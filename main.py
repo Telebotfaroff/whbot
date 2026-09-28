@@ -445,6 +445,38 @@ async def stats(_, message):
         await message.reply_text("❌ " + str(exc))
 
 
+def series_crawl_progress_factory(status, start_page, end_page):
+    state = {"last": 0.0}
+
+    def progress(series, series_id, is_new):
+        now = time.monotonic()
+        if now - state["last"] < 5.0:
+            return
+        state["last"] = now
+
+        current_page = progress.current_page
+        processed = progress.processed
+        new_count = progress.new_count
+        name = series.get("name") or series.get("series_url") or "Unknown"
+        total_episodes = series.get("total_episodes") or len(series.get("episode_urls") or [])
+
+        text = (
+            "🕷️ <b>Series crawler running</b>\\n\\n"
+            f"📄 Pages: <b>{current_page}/{end_page}</b>\\n"
+            f"📚 Series processed: <b>{processed}</b>\\n"
+            f"🆕 New series: <b>{new_count}</b>\\n"
+            f"🎬 Current: <b>{html.escape(name)}</b>\\n"
+            f"📺 Episodes: <b>{total_episodes}</b>\\n\\n"
+            "🔄 Next update in up to 5 seconds..."
+        )
+        asyncio.run_coroutine_threadsafe(safe_edit(status, text), app.loop)
+
+    progress.current_page = start_page
+    progress.processed = 0
+    progress.new_count = 0
+    return progress
+
+
 @app.on_message(filters.command("crawl"))
 async def crawl_command(_, message):
     CRAWL_STATES[message.chat.id] = {"stage": "start"}
