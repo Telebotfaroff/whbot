@@ -741,14 +741,52 @@ async def setchannel_command(_, message):
     if not message.from_user:
         await message.reply_text("❌ Telegram did not provide your user identity. Please send /setchannel again in the bot's private chat.")
         return
+
     CHANNEL_SETUP_USERS.add(message.from_user.id)
+
+    # If the owner forwards any message from the target channel here, we can
+    # learn the real channel peer directly from Telegram instead of relying on
+    # a possibly stale DOWNLOAD_CHANNEL_ID/peer cache.
+    forwarded_chat = getattr(message, "forward_from_chat", None)
+    if forwarded_chat and getattr(forwarded_chat, "type", None) and getattr(getattr(forwarded_chat, "type", None), "value", None) == "channel":
+        channel_id = getattr(forwarded_chat, "id", None)
+        if channel_id:
+            try:
+                me = await app.get_me()
+                member = await app.get_chat_member(channel_id, me.id)
+                status_value = getattr(getattr(member, "status", None), "value", None) or str(getattr(member, "status", ""))
+                if status_value in {"administrator", "owner"}:
+                    save_download_channel_setting(channel_id)
+                    CHANNEL_SETUP_USERS.clear()
+                    title = getattr(forwarded_chat, "title", None) or getattr(forwarded_chat, "username", None) or "Unknown"
+                    await message.reply_text(
+                        "✅ <b>Download channel verified!</b>\n\n"
+                        "📥 Channel: <b>{}</b>\n"
+                        "🆔 ID: <code>{}</code>\n"
+                        "👑 Bot status: <b>{}</b>".format(
+                            html.escape(str(title)), channel_id, html.escape(str(status_value))
+                        )
+                    )
+                    print("[telegram setup] VERIFIED forwarded channel id={} title={} status={}".format(channel_id, title, status_value), flush=True)
+                    return
+                await message.reply_text("❌ I found the forwarded channel, but I am not an administrator there.")
+                return
+            except Exception as exc:
+                print("[telegram setup] forwarded channel verification failed: {}".format(exc), flush=True)
+                await message.reply_text(
+                    "❌ I found the forwarded channel, but Telegram could not verify my access yet. "
+                    "Make sure I am an Administrator in that channel, then send /setchannel again with a forwarded message.\n\n"
+                    "<code>{}</code>".format(html.escape(str(exc)))
+                )
+                return
+
     await message.reply_text(
         "📥 <b>Download channel setup</b>\n\n"
         "1️⃣ Add me to <b>Hentaiiiiii</b> as an <b>Administrator</b>.\n"
-        "2️⃣ In Hentaiiiiii, send exactly <code>/verify</code>.\n"
-        "3️⃣ I will verify my admin access and save that channel automatically.\n\n"
+        "2️⃣ Send me <b>any forwarded message from Hentaiiiiii</b>.\n"
+        "3️⃣ I will detect the channel ID, verify my admin access, and save it automatically.\n\n"
         "👤 Owner ID: <code>7367490186</code>\n"
-        "📌 Target channel ID: <code>-1003671348585</code>"
+        "📌 Current channel ID: <code>-1003671348585</code>"
     )
 
 
