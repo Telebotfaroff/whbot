@@ -1,24 +1,32 @@
 import asyncio
 import html
+import json
 import os
-import time
+import re
+import shutil
 import sqlite3
+import subprocess
+import threading
+import time
 from pathlib import Path
 
 from dotenv import load_dotenv
 from pyrogram import Client, filters
+from pyrogram.enums import ParseMode
 from pyrogram.errors import RPCError
 from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from providers.watchhentai import WatchHentai, ProviderError
-from crawler.catalog import DB_PATH
-from publisher import publish_pending
+from crawler.catalog import DB_PATH, init_db, crawl_series
+from publisher import publish_pending, publish_ids
 
 load_dotenv()
 
 API_ID = int(os.getenv("API_ID", "0"))
 API_HASH = os.getenv("API_HASH")
 BOT_TOKEN = os.getenv("BOT_TOKEN")
+CHANNEL_ID = os.getenv("CHANNEL_ID")
+DOWNLOAD_CHANNEL_ID = os.getenv("DOWNLOAD_CHANNEL_ID")
 
 if not API_ID or not API_HASH or not BOT_TOKEN:
     raise RuntimeError("API_ID, API_HASH and BOT_TOKEN are required")
@@ -26,22 +34,35 @@ if not API_ID or not API_HASH or not BOT_TOKEN:
 DOWNLOAD_DIR = Path(os.getenv("DOWNLOAD_DIR", "./downloads"))
 DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
-# Telegram channel used for bulk/download uploads.
-DOWNLOAD_CHANNEL_ID = int(os.getenv("DOWNLOAD_CHANNEL_ID", "-1003671348585"))
+PYROGRAM_WORKDIR = Path(os.getenv("PYROGRAM_WORKDIR", "./.pyrogram"))
+PYROGRAM_WORKDIR.mkdir(parents=True, exist_ok=True)
 
 MAX_UPLOAD_BYTES = 2 * 1024 * 1024 * 1024
 # Small pause before each Telegram media upload to reduce request bursts.
 TELEGRAM_UPLOAD_DELAY = float(os.getenv("TELEGRAM_UPLOAD_DELAY", "2.0"))
 CALLBACK_URLS = {}
+AUTO_LOCK = asyncio.Lock()
+AUTO_STOP = threading.Event()
+CRAWL_STATES = {}
+DOWNLOAD_STATES = {}
 
 app = Client(
     "whbot",
     api_id=API_ID,
     api_hash=API_HASH,
     bot_token=BOT_TOKEN,
-    workdir=str(Path(".pyrogram")),
+    workdir=str(PYROGRAM_WORKDIR),
+    parse_mode=ParseMode.HTML,
 )
 provider = WatchHentai()
+
+# Background crawling is intentionally OFF by default.
+CRAWL_INTERVAL = max(int(os.getenv("CRAWL_INTERVAL", "1800")), 60)
+CRAWL_PAGES = max(int(os.getenv("CRAWL_PAGES", "1")), 1)
+PUBLISH_LIMIT = max(int(os.getenv("PUBLISH_LIMIT", "20")), 1)
+INITIAL_CRAWL_PAGES = max(int(os.getenv("INITIAL_CRAWL_PAGES", "0")), 0)
+SCHEDULER_ENABLED = os.getenv("SCHEDULER_ENABLED", "false").lower() not in {"0", "false", "no", "off"}
+BACKGROUND_LOCK = threading.Lock()
 
 
 def enc(value):
@@ -57,17 +78,93 @@ def dec(value):
     return CALLBACK_URLS[value]
 
 
+def format_duration(seconds):
+    seconds = int(seconds or 0)
+    if seconds <= 0:
+        return "Unknown"
+    hours, rem = divmod(seconds, 3600)
+    minutes, secs = divmod(rem, 60)
+    if hours:
+        return f"{hours}:{minutes:02d}:{secs:02d}"
+    return f"{minutes}:{secs:02d}"
+
+
+def video_metadata(path):
+    ffprobe = shutil.which("ffprobe")
+    if not ffprobe:
+        return {"duration": 0, "width": 0, "height": 0}
+
+    try:
+        result = subprocess.run(
+            [
+                ffprobe, "-v", "error",
+                "-select_streams", "v:0",
+                "-show_entries", "stream=width,height:format=duration",
+                "-of", "json", str(path),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=True,
+        )
+        data = json.loads(result.stdout or "{}")
+        stream = (data.get("streams") or [{}])[0]
+        fmt = data.get("format") or {}
+        return {
+            "duration": int(float(fmt.get("duration") or 0)),
+            "width": int(stream.get("width") or 0),
+            "height": int(stream.get("height") or 0),
+        }
+    except Exception:
+        return {"duration": 0, "width": 0, "height": 0}
+
+
+def db_rows(query, params=()):
+    # Ensure the SQLite schema exists before any read. This is important on a
+    # fresh Colab runtime where /latest may be the first database operation.
+    con = init_db()
+    try:
+        return con.execute(query, params).fetchall()
+    finally:
+        con.close()
+
+
+def mark_video_uploaded(post_id, message_id):
+    con = init_db()
+    try:
+        con.execute(
+            "UPDATE posts SET video_uploaded=1, video_message_id=? WHERE id=?",
+            (message_id, post_id),
+        )
+        con.commit()
+    finally:
+        con.close()
+
+
 def episode_keyboard(ep):
     rows = []
-    nav = []
     navigation = ep["navigation"]
 
-    if navigation.get("previous"):
-        nav.append(InlineKeyboardButton("⬅ Previous", callback_data="ep:" + enc(navigation["previous"])))
+    view = [InlineKeyboardButton("▶️ View Episode", url=ep["page_url"])]
     if navigation.get("series"):
-        nav.append(InlineKeyboardButton("📋 All Episodes", url=navigation["series"]))
+        view.append(InlineKeyboardButton("📋 All Episodes", url=navigation["series"]))
+    rows.append(view)
+
+    nav = []
+    if navigation.get("previous"):
+        nav.append(
+            InlineKeyboardButton(
+                "⬅ Previous",
+                callback_data="ep:" + enc(navigation["previous"]),
+            )
+        )
     if navigation.get("next"):
-        nav.append(InlineKeyboardButton("Next ➡", callback_data="ep:" + enc(navigation["next"])))
+        nav.append(
+            InlineKeyboardButton(
+                "Next ➡",
+                callback_data="ep:" + enc(navigation["next"]),
+            )
+        )
     if nav:
         rows.append(nav)
 
@@ -87,12 +184,14 @@ def episode_keyboard(ep):
 def episode_text(ep):
     title = html.escape(ep["title"])
     synopsis = html.escape(ep.get("synopsis") or "")
-    if len(synopsis) > 700:
-        synopsis = synopsis[:697] + "..."
+    if len(synopsis) > 600:
+        synopsis = synopsis[:597] + "..."
 
+    total = ep.get("series_total") or "?"
     lines = [
         f"🎬 <b>{title}</b>",
         f"📺 Episode: <b>{ep.get('episode') or '?'}</b>",
+        f"📚 Total Episodes: <b>{total}</b>",
     ]
 
     if synopsis:
@@ -115,7 +214,6 @@ async def show(message, ep):
                 message.chat.id,
                 ep["thumbnail"],
                 caption=caption,
-                parse_mode="html",
                 reply_markup=markup,
             )
             return
@@ -125,9 +223,117 @@ async def show(message, ep):
     await app.send_message(
         message.chat.id,
         caption,
-        parse_mode="html",
         reply_markup=markup,
     )
+
+
+def choose_source(ep, preferred=None):
+    sources = ep.get("sources") or []
+    if preferred:
+        exact = next(
+            (source for source in sources if source["label"].lower() == preferred.lower()),
+            None,
+        )
+        if exact:
+            return exact
+
+    order = {"2160p": 4, "1440p": 3, "1080p": 2, "720p": 1}
+    return max(sources, key=lambda source: order.get(source["label"].lower(), 0), default=None)
+
+
+async def download_and_send(
+    ep,
+    target_chat,
+    preferred_quality=None,
+    status=None,
+    post_id=None,
+    series_name=None,
+    series_total=None,
+):
+    source = choose_source(ep, preferred_quality)
+    if not source:
+        raise ProviderError("No downloadable video source is available")
+
+    safe = "".join(
+        char if char.isalnum() or char in "._-" else "_"
+        for char in ep["title"]
+    )[:80]
+    label = source["label"]
+    output = DOWNLOAD_DIR / f"{safe}-{label}.mp4"
+    thumb = DOWNLOAD_DIR / f"{safe}-{label}.jpg"
+
+    if status:
+        await status.edit_text(
+            f"⬇️ Downloading <b>{html.escape(label)}</b> — "
+            f"{html.escape(ep['title'])}"
+        )
+
+    try:
+        await asyncio.to_thread(
+            provider.download,
+            source["url"],
+            output,
+            download_progress_factory(status) if status else None,
+            ep.get("page_url"),
+        )
+
+        size = output.stat().st_size
+        if size > MAX_UPLOAD_BYTES:
+            raise ProviderError(
+                "File is {:.2f} GB, above the 2 GB Pyrogram limit.".format(
+                    size / 1073741824
+                )
+            )
+
+        metadata = await asyncio.to_thread(video_metadata, output)
+
+        if status:
+            await status.edit_text("🖼 Preparing thumbnail and Telegram metadata...")
+
+        thumb_path = None
+        if ep.get("thumbnail"):
+            try:
+                thumb_path = await asyncio.to_thread(
+                    provider.download_thumbnail,
+                    ep["thumbnail"],
+                    thumb,
+                )
+            except Exception as exc:
+                print("[thumbnail] {}".format(exc), flush=True)
+
+        duration = metadata["duration"]
+        caption = (
+            f"🎬 <b>{html.escape(ep['title'])}</b>\n"
+            f"📺 Episode: <b>{ep.get('episode') or '?'}</b>\n"
+            f"🎥 Quality: <b>{html.escape(label)}</b>\n"
+            f"⏱ Duration: <b>{format_duration(duration)}</b>"
+        )
+
+        if status:
+            await status.edit_text("📤 Uploading video to Telegram...")
+
+        started = time.monotonic()
+        sent = await app.send_video(
+            chat_id=target_chat,
+            video=str(output),
+            thumb=str(thumb_path) if thumb_path else None,
+            caption=caption,
+            duration=duration or None,
+            width=metadata["width"] or None,
+            height=metadata["height"] or None,
+            file_name=output.name,
+            supports_streaming=True,
+            progress=upload_progress,
+            progress_args=(status, started),
+        )
+
+        if post_id is not None:
+            mark_video_uploaded(post_id, sent.id)
+
+        return sent
+    finally:
+        output.unlink(missing_ok=True)
+        thumb.unlink(missing_ok=True)
 
 
 @app.on_message(filters.command("help"))
@@ -135,15 +341,19 @@ async def help_command(_, message):
     await message.reply_text(
         "<b>WHBot Help</b>\n\n"
         "🔎 <b>Browse</b>\n"
-        "/latest — latest catalog posts\n"
+        "/latest — show one latest post\n"
         "/search &lt;query&gt; — search the local catalog\n"
         "/episode &lt;URL&gt; — open a specific episode\n\n"
         "⚙️ <b>Catalog</b>\n"
         "/stats — catalog statistics\n"
-        "/crawl — import pages 1–121\n"
-        "/publish — publish pending channel posts\n\n"
-        "⬇️ Open an episode to view available qualities and use the download buttons.",
-        parse_mode="html",
+        "/crawl — crawl series pages into the catalog\n"
+        "/download — download an entire series to the download channel\n"
+        "/publish — publish catalog metadata\n\n"
+        "🤖 <b>Auto uploader</b>\n"
+        "/auto — download and upload all pending episodes sequentially\n"
+        "/auto 720p — use 720p when available\n"
+        "/auto stop — stop after the current transfer\n\n"
+        "⬇️ Open an episode to view qualities and download it."
     )
 
 
@@ -151,41 +361,32 @@ async def help_command(_, message):
 async def start(_, message):
     await message.reply_text(
         "WHBot ready.\n\n"
-        "/latest - latest catalog posts\n"
+        "/latest - latest single catalog post\n"
         "/search <query> - search local catalog\n"
         "/episode <URL> - open an episode\n"
         "/stats - catalog statistics\n"
-        "/crawl - import catalog pages 1-121\n"
-        "/publish - publish pending catalog posts"
+        "/crawl - crawl series catalog\n"
+        "/download - download a complete series to the download channel\n"
+        "/publish - publish catalog metadata\n"
+        "/auto - sequentially upload pending episodes"
     )
-
-
-def db_rows(query, params=()):
-    con = sqlite3.connect(DB_PATH)
-    try:
-        return con.execute(query, params).fetchall()
-    finally:
-        con.close()
 
 
 @app.on_message(filters.command("latest"))
 async def latest(_, message):
-    status = await message.reply_text("🔎 Loading latest catalog posts...")
+    status = await message.reply_text("🔎 Loading latest post...")
     try:
         rows = await asyncio.to_thread(
             db_rows,
-            "SELECT url FROM posts ORDER BY id DESC LIMIT 10",
+            "SELECT url FROM posts ORDER BY id DESC LIMIT 1",
         )
         if not rows:
             await status.edit_text("Catalog is empty. Run /crawl first.")
             return
+
+        ep = await asyncio.to_thread(provider.get_episode, rows[0][0], True)
         await status.delete()
-        for (url,) in rows:
-            try:
-                ep = await asyncio.to_thread(provider.get_episode, url, True)
-                await show(message, ep)
-            except Exception as exc:
-                await message.reply_text("⚠️ Could not load one episode: " + str(exc))
+        await show(message, ep)
     except Exception as exc:
         await status.edit_text("❌ " + str(exc))
 
@@ -198,11 +399,10 @@ async def search(_, message):
 
     query = " ".join(message.command[1:]).strip()
     status = await message.reply_text(
-        f"🔎 Searching local catalog for <b>{html.escape(query)}</b>...",
-        parse_mode="html",
+        f"🔎 Searching local catalog for <b>{html.escape(query)}</b>..."
     )
     try:
-        like = "%" + query.replace("%", "\%").replace("_", "\_") + "%"
+        like = "%" + query.replace("%", "\\%").replace("_", "\\_") + "%"
         rows = await asyncio.to_thread(
             db_rows,
             "SELECT url FROM posts WHERE title LIKE ? ESCAPE '\\' "
@@ -212,14 +412,15 @@ async def search(_, message):
         if not rows:
             await status.edit_text("No matching posts in local catalog.")
             return
-        await status.edit_text(f"Found {len(rows)} result(s). Loading...")
+
+        await status.delete()
+        # Search intentionally shows results one at a time, each with navigation.
         for (url,) in rows[:10]:
             try:
                 ep = await asyncio.to_thread(provider.get_episode, url, True)
                 await show(message, ep)
             except Exception as exc:
                 await message.reply_text("⚠️ Could not load result: " + str(exc))
-        await status.delete()
     except Exception as exc:
         await status.edit_text("❌ " + str(exc))
 
@@ -229,14 +430,16 @@ async def stats(_, message):
     try:
         row = await asyncio.to_thread(
             db_rows,
-            "SELECT COUNT(*), SUM(CASE WHEN published=1 THEN 1 ELSE 0 END) FROM posts",
+            "SELECT COUNT(*), "
+            "SUM(CASE WHEN published=1 THEN 1 ELSE 0 END), "
+            "SUM(CASE WHEN video_uploaded=1 THEN 1 ELSE 0 END) FROM posts",
         )
-        total, published = row[0]
+        total, published, uploaded = row[0]
         await message.reply_text(
             f"📊 <b>Catalog</b>\n\n"
             f"Posts: <b>{total or 0}</b>\n"
-            f"Published: <b>{published or 0}</b>",
-            parse_mode="html",
+            f"Metadata published: <b>{published or 0}</b>\n"
+            f"Videos uploaded: <b>{uploaded or 0}</b>"
         )
     except Exception as exc:
         await message.reply_text("❌ " + str(exc))
@@ -244,23 +447,214 @@ async def stats(_, message):
 
 @app.on_message(filters.command("crawl"))
 async def crawl_command(_, message):
-    status = await message.reply_text("🕷 Starting catalog import: pages 1-121...")
+    CRAWL_STATES[message.chat.id] = {"stage": "start"}
+    await message.reply_text(
+        "🕷 <b>Catalog crawler</b>\n\n"
+        "Send the <b>starting series page number</b>.\n"
+        "Use <b>0</b> for https://watchhentai.net/series/.\n"
+        "Example: <code>0</code>"
+    )
+
+
+@app.on_message(filters.text)
+async def crawl_input(_, message):
+    if message.text.startswith("/"):
+        return
+
+    if DOWNLOAD_STATES.get(message.chat.id):
+        await start_series_download(message, message.text.strip())
+        return
+
+    state = CRAWL_STATES.get(message.chat.id)
+    if not state:
+        return
+
     try:
-        from crawler.catalog import crawl
-        await asyncio.to_thread(crawl, 121, 0.25, crawl_progress_factory(status))
-        await status.edit_text("✅ Catalog import completed.")
+        value = int(message.text.strip())
+        if value < 0:
+            raise ValueError
+    except ValueError:
+        await message.reply_text(
+            "❌ Send a whole number such as <b>0</b>, <b>7</b> or <b>121</b>."
+        )
+        return
+
+    if state["stage"] == "start":
+        state["start"] = value
+        state["stage"] = "end"
+        await message.reply_text(
+            "✅ Starting page: <b>{}</b>\n\n"
+            "Now send the <b>ending page number</b>.\n"
+            "It must be greater than or equal to the starting page.".format(value)
+        )
+        return
+
+    start_page = state["start"]
+    end_page = value
+
+    if end_page < start_page:
+        await message.reply_text("❌ Ending page cannot be smaller than starting page.")
+        return
+
+    CRAWL_STATES.pop(message.chat.id, None)
+
+    status = await message.reply_text(
+        "🕷 <b>Crawling series pages {} → {}</b>\n"
+        "0 = /series/; other numbers = /series/page/N/\n\n"
+        "Each series page will be inspected for name, thumbnail and total episodes.".format(
+            start_page, end_page
+        )
+    )
+
+    try:
+        with BACKGROUND_LOCK:
+            result = await asyncio.to_thread(
+                crawl_series, start_page, end_page, 0.25
+            )
+
+        await status.edit_text(
+            "✅ <b>Series crawl completed</b>\n\n"
+            "Pages: <b>{} → {}</b>\n"
+            "Series processed: <b>{}</b>\n"
+            "New series: <b>{}</b>\n\n"
+            "Saved: name, thumbnail, series URL and total episodes.".format(
+                start_page,
+                end_page,
+                result.get("processed", 0),
+                len(result.get("new_ids", [])),
+            )
+        )
     except Exception as exc:
-        await status.edit_text("❌ Crawl failed: " + str(exc))
+        await status.edit_text("❌ Series crawl failed: " + html.escape(str(exc)))
+
+
+@app.on_message(filters.command("download"))
+async def download_command(_, message):
+    if not DOWNLOAD_CHANNEL_ID:
+        await message.reply_text("❌ DOWNLOAD_CHANNEL_ID is not configured.")
+        return
+
+    if len(message.command) >= 2:
+        await start_series_download(message, " ".join(message.command[1:]).strip())
+        return
+
+    DOWNLOAD_STATES[message.chat.id] = True
+    await message.reply_text(
+        "📥 <b>Series downloader</b>\n\n"
+        "Send the series URL.\n"
+        "Example:\n"
+        "<code>https://watchhentai.net/series/kuro-gal-a-la-carte-id-01/</code>"
+    )
+
+
+async def start_series_download(message, series_url, status=None):
+    if message is not None:
+        DOWNLOAD_STATES.pop(message.chat.id, None)
+
+    if not re.match(r"^https?://watchhentai\.net/series/[^\s]+/?$", series_url, re.I):
+        await message.reply_text("❌ Please send a valid WatchHentai series URL.")
+        return
+
+    if AUTO_LOCK.locked():
+        if message is not None:
+            await message.reply_text("⏳ Another download/upload job is already running.")
+        return
+
+    owns_lock = not AUTO_LOCK.locked()
+    if owns_lock:
+        await AUTO_LOCK.acquire()
+
+    if status is None:
+        status = await message.reply_text("🔎 Resolving series and episode list...")
+    try:
+            series = await asyncio.to_thread(provider.get_series, series_url)
+            episode_items = await asyncio.to_thread(
+                provider.series_episodes, series["series_url"]
+            )
+
+            if not episode_items:
+                raise ProviderError("No episodes found in this series.")
+
+            total = series.get("total_episodes") or len(episode_items)
+            await safe_edit(
+                status,
+                "📚 <b>{}</b>\nEpisodes found: <b>{}</b>\nPreparing channel post...".format(
+                    html.escape(series["name"]), total
+                ),
+            )
+
+            await app.send_photo(
+                DOWNLOAD_CHANNEL_ID,
+                series["thumbnail"],
+                caption=(
+                    f"🎬 <b>{html.escape(series['name'])}</b>\n"
+                    f"📚 Total Episodes: <b>{total}</b>\n"
+                    f"🔗 <a href=\"{html.escape(series['series_url'], quote=True)}\">View Series</a>"
+                ),
+            )
+
+            def episode_number(item):
+                m = re.search(r"episode[-\s]+(\d+)", item["page_url"], re.I)
+                return int(m.group(1)) if m else 10**9
+
+            episode_items.sort(key=episode_number)
+
+            for index, item in enumerate(episode_items, 1):
+                ep = await asyncio.to_thread(
+                    provider.get_episode, item["page_url"], True
+                )
+                source = choose_source(ep)
+                if not source:
+                    await safe_edit(
+                        status,
+                        f"⚠️ Skipping episode {index}/{total}: no downloadable source."
+                    )
+                    continue
+
+                await safe_edit(
+                    status,
+                    "⬇️ <b>Episode {}/{}</b> — resolving <b>{}</b>...".format(
+                        index, total, html.escape(source["label"])
+                    ),
+                )
+
+                await download_and_send(
+                    ep,
+                    DOWNLOAD_CHANNEL_ID,
+                    preferred_quality=source["label"],
+                    status=status,
+                    series_name=series["name"],
+                    series_total=total,
+                )
+
+                await safe_edit(
+                    status,
+                    "✅ <b>Episode {}/{}</b> uploaded to download channel.".format(
+                        index, total
+                    ),
+                )
+
+            await safe_edit(
+                status,
+                "🎉 <b>Series download complete</b>\n\n"
+                f"{html.escape(series['name'])}\n"
+                f"Episodes: <b>{total}</b>",
+            )
+    except Exception as exc:
+        await safe_edit(status, "❌ Download failed: " + html.escape(str(exc)))
+    finally:
+        if owns_lock:
+            AUTO_LOCK.release()
 
 
 @app.on_message(filters.command("publish"))
 async def publish_command(_, message):
     status = await message.reply_text("📢 Publishing pending catalog posts...")
     try:
-        count = await asyncio.to_thread(publish_pending, 20)
+        with BACKGROUND_LOCK:
+            count = await asyncio.to_thread(publish_pending, 20)
         await status.edit_text(
-            "✅ Published <b>{}</b> pending post(s).".format(count),
-            parse_mode="html",
+            "✅ Published <b>{}</b> pending post(s).".format(count)
         )
     except Exception as exc:
         await status.edit_text("❌ Publish failed: " + str(exc))
@@ -370,24 +764,22 @@ def crawl_progress_factory(status):
 
 
 async def safe_edit(status, text):
+    if status is None:
+        return
     try:
-        await status.edit_text(text, parse_mode="html")
+        await status.edit_text(text)
     except RPCError:
         pass
 
 
 async def upload_progress(current, total, status, started):
-    now = time.monotonic()
-    state = getattr(upload_progress, "_state", None)
-    if state is None:
-        state = upload_progress._state = {"last": 0.0, "started": started}
-
-    # Pyrogram can invoke progress very frequently; edit Telegram only
-    # when the interval has elapsed or the upload is complete.
-    if now - state["last"] < PROGRESS_UPDATE_INTERVAL and current < total:
+    if status is None:
         return
-
-    state["last"] = now
+    now = time.monotonic()
+    last = getattr(upload_progress, "_last", 0.0)
+    if now - last < 1.0 and current < total:
+        return
+    upload_progress._last = now
     await safe_edit(
         status,
         progress_text("📤 <b>Uploading to Telegram</b>", current, total, started),
@@ -398,24 +790,127 @@ def download_progress_factory(status):
     state = {"last": 0.0}
 
     def progress(current, total, started):
+        if status is None:
+            return
         now = time.monotonic()
         if now - state["last"] < PROGRESS_UPDATE_INTERVAL and (not total or current < total):
             return
         state["last"] = now
-
-        text = progress_text(
-            "⬇️ <b>Downloading video</b>",
-            current,
-            total,
-            started,
-        )
-
         asyncio.run_coroutine_threadsafe(
-            safe_edit(status, text),
+            safe_edit(
+                status,
+                progress_text("⬇️ Downloading...", current, total, started),
+            ),
             app.loop,
         )
 
     return progress
+
+
+async def run_auto(status):
+    if not DOWNLOAD_CHANNEL_ID:
+        raise RuntimeError("DOWNLOAD_CHANNEL_ID is required for /auto")
+
+    con = init_db()
+    try:
+        rows = con.execute(
+            """SELECT id,url,name,total_episodes
+               FROM series
+               ORDER BY id ASC"""
+        ).fetchall()
+    finally:
+        con.close()
+
+    if not rows:
+        await status.edit_text(
+            "✅ Series auto queue is empty. Run /crawl first."
+        )
+        return
+
+    AUTO_STOP.clear()
+    total = len(rows)
+    completed = 0
+
+    for index, row in enumerate(rows, 1):
+        if AUTO_STOP.is_set():
+            await status.edit_text(
+                f"⏹ <b>Series auto downloader stopped.</b>\n"
+                f"Completed: <b>{completed}/{total}</b>"
+            )
+            return
+
+        series_id, series_url, series_name, episode_total = row
+
+        await safe_edit(
+            status,
+            f"🤖 <b>Auto series downloader</b>\n"
+            f"Series: <b>{html.escape(series_name or series_url)}</b>\n"
+            f"Series queue: <b>{index}/{total}</b>\n"
+            f"Episodes: <b>{episode_total or '?'}</b>"
+        )
+
+        try:
+            # Reuse the exact same bulk downloader used by /download.
+            # It resolves the series, finds every episode, selects the best
+            # available quality and uploads the complete series sequentially.
+            await start_series_download(
+                message=None,
+                series_url=series_url,
+                status=status,
+            )
+            completed += 1
+
+            await safe_edit(
+                status,
+                f"✅ <b>Series {completed}/{total} completed</b>\n"
+                f"{html.escape(series_name or series_url)}"
+            )
+        except Exception as exc:
+            await safe_edit(
+                status,
+                f"⚠️ <b>Series failed</b>\n"
+                f"{html.escape(series_name or series_url)}\n"
+                f"{html.escape(str(exc))}\n\n"
+                f"Continuing: <b>{completed}/{total}</b>"
+            )
+            await asyncio.sleep(1)
+
+    await safe_edit(
+        status,
+        f"🎉 <b>Series auto downloader finished</b>\n"
+        f"Completed: <b>{completed}/{total}</b>"
+    )
+
+
+@app.on_message(filters.command("auto"))
+async def auto_command(_, message):
+    args = message.command[1:]
+    if args and args[0].lower() == "stop":
+        AUTO_STOP.set()
+        await message.reply_text(
+            "⏹ Series auto downloader will stop after the current series."
+        )
+        return
+
+    if args:
+        await message.reply_text(
+            "Usage: /auto or /auto stop\n"
+            "Quality is selected automatically at the highest available level."
+        )
+        return
+
+    if AUTO_LOCK.locked():
+        await message.reply_text("⚠️ A download/upload job is already running.")
+        return
+
+    status = await message.reply_text("🤖 Starting series auto downloader...")
+
+    try:
+        await run_auto(status)
+    except Exception as exc:
+        await status.edit_text(
+            "❌ Series auto downloader failed: " + html.escape(str(exc))
+        )
 
 
 @app.on_callback_query()
@@ -436,64 +931,28 @@ async def callback(_, query):
         encoded_page, encoded_label = query.data[3:].split(":", 1)
         page_url = dec(encoded_page)
         label = dec(encoded_label)
-
-        ep = await asyncio.to_thread(
-            provider.get_episode, page_url, True
-        )
-
-        source = next(
-            (item for item in ep["sources"] if item["label"] == label),
-            None,
-        )
-        if not source:
-            raise ProviderError("Source unavailable")
-
-        safe = "".join(
-            char if char.isalnum() or char in "._-" else "_"
-            for char in ep["title"]
-        )[:80]
-
-        output = DOWNLOAD_DIR / f"{safe}-{label}.mp4"
-
         status = await query.message.reply_text(
-            f"⬇️ Downloading <b>{html.escape(label)}</b>...",
-            parse_mode="html",
+            f"⬇️ Resolving <b>{html.escape(label)}</b>..."
         )
+        ep = await asyncio.to_thread(provider.get_episode, page_url, True)
 
+        available = {
+            str(source.get("label", "")).lower(): source
+            for source in (ep.get("sources") or [])
+        }
+        if label.lower() not in available:
+            raise ProviderError(
+                "Requested quality is not available. Available: "
+                + (", ".join(sorted(available)) or "none")
+            )
         try:
-            await asyncio.to_thread(
-                provider.download,
-                source["url"],
-                output,
-                download_progress_factory(status),
+            await download_and_send(
+                ep,
+                query.message.chat.id,
+                preferred_quality=label,
+                status=status,
             )
-
-            size = output.stat().st_size
-
-            if size > MAX_UPLOAD_BYTES:
-                await status.edit_text(
-                    f"❌ File is {size / 1073741824:.2f} GB, above the 2 GB application limit."
-                )
-                output.unlink(missing_ok=True)
-                return
-
-            await status.edit_text("📤 Preparing Telegram upload...")
-            if TELEGRAM_UPLOAD_DELAY > 0:
-                await asyncio.sleep(TELEGRAM_UPLOAD_DELAY)
-            started = time.monotonic()
-
-            await app.send_video(
-                chat_id=query.message.chat.id,
-                video=str(output),
-                caption=f"{ep['title']} — {label}",
-                supports_streaming=True,
-                progress=upload_progress,
-                progress_args=(status, started),
-            )
-
-            output.unlink(missing_ok=True)
             await status.delete()
-
         except Exception:
             raise
 
@@ -501,6 +960,60 @@ async def callback(_, query):
         await query.message.reply_text("❌ " + str(exc))
 
 
+def scheduler_loop():
+    from crawler.scheduler import check_once
+
+    if INITIAL_CRAWL_PAGES:
+        try:
+            print(
+                "[scheduler] initial crawl: {} page(s)".format(INITIAL_CRAWL_PAGES),
+                flush=True,
+            )
+            with BACKGROUND_LOCK:
+                from crawler.catalog import crawl
+                crawl(INITIAL_CRAWL_PAGES, 0.25)
+        except Exception as exc:
+            print("[scheduler] initial crawl failed: {}".format(exc), flush=True)
+
+    while True:
+        try:
+            print(
+                "[scheduler] checking first {} page(s)...".format(CRAWL_PAGES),
+                flush=True,
+            )
+            with BACKGROUND_LOCK:
+                added = check_once(CRAWL_PAGES)
+                published = publish_pending(PUBLISH_LIMIT)
+            print(
+                "[scheduler] added={}, published={}".format(added, published),
+                flush=True,
+            )
+        except Exception as exc:
+            print("[scheduler] check failed: {}".format(exc), flush=True)
+
+        time.sleep(CRAWL_INTERVAL)
+
+
+def start_background_scheduler():
+    if not SCHEDULER_ENABLED:
+        print("[scheduler] disabled (manual /crawl and /publish only)", flush=True)
+        return
+
+    thread = threading.Thread(
+        target=scheduler_loop,
+        name="catalog-scheduler",
+        daemon=True,
+    )
+    thread.start()
+    print(
+        "[scheduler] enabled: every {}s, pages={}, publish_limit={}".format(
+            CRAWL_INTERVAL, CRAWL_PAGES, PUBLISH_LIMIT
+        ),
+        flush=True,
+    )
+
+
 if __name__ == "__main__":
-    print("WHBot running with Pyrogram")
+    print("WHBot starting", flush=True)
+    start_background_scheduler()
     app.run()
