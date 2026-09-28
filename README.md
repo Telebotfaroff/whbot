@@ -45,3 +45,25 @@ WATCHHENTAI_BASE_URL=https://watchhentai.net
 DOWNLOAD_DIR=./downloads
 WH_DB_PATH=./data/watchhentai.db
 ```
+
+
+## Telegram channel publishing
+
+Set:
+
+```env
+CHANNEL_ID=@your_channel
+TELEGRAM_CHANNEL_INTERVAL=1.2
+```
+
+The scheduler automatically publishes unpublished catalog entries. It stores the Telegram message ID in SQLite so published posts are not sent again.
+
+Manual publishing:
+
+```text
+/publish
+```
+
+The publisher intentionally spaces channel sends by at least 1.2 seconds. Telegram's Bot FAQ says to avoid sending more than one message per second in a single chat and documents 429 responses when limits are exceeded. The publisher also reads Telegram's `retry_after` value from HTTP 429 responses and waits before retrying. urlTelegram Bots FAQhttps://core.telegram.org/bots/faq
+
+The publisher posts the catalog metadata/thumbnail and source page link; it does not automatically upload the source video files to the channel.
