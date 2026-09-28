@@ -279,7 +279,7 @@ async def episode(_, message):
 
 
 PROGRESS_BAR_LENGTH = 12
-PROGRESS_UPDATE_INTERVAL = 1.5
+PROGRESS_UPDATE_INTERVAL = 2.0
 
 
 def format_time(seconds):
