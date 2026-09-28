@@ -698,7 +698,7 @@ async def incoming_debug(_, message):
         print("[incoming] log error: {}".format(exc), flush=True)
 
 
-@app.on_message(filters.command("help"))
+@app.on_message(filters.command("help", prefixes=["/"]))
 async def help_command(_, message):
     print("[command] /help chat_id={}".format(message.chat.id), flush=True)
     await message.reply_text(
@@ -721,7 +721,7 @@ async def help_command(_, message):
     )
 
 
-@app.on_message(filters.command("setchannel"))
+@app.on_message(filters.command("setchannel", prefixes=["/"]))
 async def setchannel_command(_, message):
     if not owner_only(message):
         await message.reply_text("❌ This command is restricted to the bot owner.")
@@ -739,7 +739,7 @@ async def setchannel_command(_, message):
     )
 
 
-@app.on_message(filters.regex(r"^/verify(?:@\w+)?(?:\s+.*)?$"), group=-1)
+@app.on_message(filters.regex(r"^/verify(?:@\w+)?(?:\s+.*)?$", flags=re.IGNORECASE), group=-1)
 async def verify_channel_command(_, message):
     chat = getattr(message, "chat", None)
     chat_type = getattr(getattr(chat, "type", None), "value", None)
