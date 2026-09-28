@@ -1241,7 +1241,7 @@ async def callback(_, query):
                 return
 
             status = await query.message.reply_text(
-                "🔎 <b>Starting series download...</b>\\n"
+                "🔎 <b>Starting series download...</b>\n"
                 "Each episode will be resolved individually."
             )
             try:
