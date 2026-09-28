@@ -212,8 +212,9 @@ class WatchHentai:
             "sources": sources,
         }
 
-    def latest(self, page=1):
-        url = self.base + "/" if page <= 1 else f"{self.base}/page/{page}/"
+    def latest(self, page=0):
+        # 0 is /videos/; every other number maps directly to /videos/page/N/.
+        url = self.base + "/videos/" if page == 0 else f"{self.base}/videos/page/{page}/"
         html = self._get(url)
         return self._episode_links(html)
 
