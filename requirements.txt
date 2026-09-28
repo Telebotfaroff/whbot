@@ -2,3 +2,4 @@ pyrogram>=2.0,<3
 tgcrypto>=1.2,<2
 python-dotenv>=1,<2
 requests>=2.31,<3
+Pillow>=10,<13
