@@ -721,21 +721,34 @@ async def help_command(_, message):
     )
 
 
-@app.on_message(filters.command("setchannel", prefixes=["/"]))
+@app.on_message(filters.regex(r"^/setchannel(?:@\\w+)?(?:\\s+.*)?$", flags=re.IGNORECASE), group=-1)
 async def setchannel_command(_, message):
+    print(
+        "[telegram setup] /setchannel received chat_id={} user_id={} chat_type={}".format(
+            getattr(getattr(message, "chat", None), "id", None),
+            getattr(getattr(message, "from_user", None), "id", None),
+            getattr(getattr(getattr(message, "chat", None), "type", None), "value", None),
+        ),
+        flush=True,
+    )
     if not owner_only(message):
         await message.reply_text("❌ This command is restricted to the bot owner.")
         return
-    if message.chat.type.value != "private":
+    chat_type = getattr(getattr(message.chat, "type", None), "value", None)
+    if chat_type != "private":
         await message.reply_text("⚠️ Please use /setchannel in the bot's private chat.")
+        return
+    if not message.from_user:
+        await message.reply_text("❌ Telegram did not provide your user identity. Please send /setchannel again in the bot's private chat.")
         return
     CHANNEL_SETUP_USERS.add(message.from_user.id)
     await message.reply_text(
         "📥 <b>Download channel setup</b>\n\n"
-        "1️⃣ Add me to your target channel as an <b>Administrator</b>.\n"
-        "2️⃣ Open that channel and send exactly <code>/verify</code>.\n"
-        "3️⃣ I will detect the channel, verify my admin access, and save it as the download channel.\n\n"
-        "❌ No channel ID is required."
+        "1️⃣ Add me to <b>Hentaiiiiii</b> as an <b>Administrator</b>.\n"
+        "2️⃣ In Hentaiiiiii, send exactly <code>/verify</code>.\n"
+        "3️⃣ I will verify my admin access and save that channel automatically.\n\n"
+        "👤 Owner ID: <code>7367490186</code>\n"
+        "📌 Target channel ID: <code>-1003671348585</code>"
     )
 
 
