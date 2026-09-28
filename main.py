@@ -2,6 +2,7 @@ import asyncio
 import html
 import os
 import time
+import sqlite3
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -10,6 +11,7 @@ from pyrogram.errors import RPCError
 from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from providers.watchhentai import WatchHentai, ProviderError
+from crawler.catalog import DB_PATH
 
 load_dotenv()
 
@@ -127,29 +129,37 @@ async def show(message, ep):
 async def start(_, message):
     await message.reply_text(
         "WHBot ready.\n\n"
-        "/latest - latest episodes\n"
-        "/search <query> - search\n"
-        "/episode <URL> - open an episode"
+        "/latest - latest catalog posts\n"
+        "/search <query> - search local catalog\n"
+        "/episode <URL> - open an episode\n"
+        "/stats - catalog statistics\n"
+        "/crawl - import catalog pages 1-121"
     )
+
+
+def db_rows(query, params=()):
+    con = sqlite3.connect(DB_PATH)
+    try:
+        return con.execute(query, params).fetchall()
+    finally:
+        con.close()
 
 
 @app.on_message(filters.command("latest"))
 async def latest(_, message):
-    status = await message.reply_text("🔎 Loading latest episodes...")
+    status = await message.reply_text("🔎 Loading latest catalog posts...")
     try:
-        items = await asyncio.to_thread(provider.latest, 1)
-        if not items:
-            await status.edit_text("No episodes found.")
+        rows = await asyncio.to_thread(
+            db_rows,
+            "SELECT url FROM posts ORDER BY id DESC LIMIT 10",
+        )
+        if not rows:
+            await status.edit_text("Catalog is empty. Run /crawl first.")
             return
-
         await status.delete()
-
-        # Resolve each item only when displaying it.
-        for item in items[:10]:
+        for (url,) in rows:
             try:
-                ep = await asyncio.to_thread(
-                    provider.get_episode, item["page_url"], True
-                )
+                ep = await asyncio.to_thread(provider.get_episode, url, True)
                 await show(message, ep)
             except Exception as exc:
                 await message.reply_text("⚠️ Could not load one episode: " + str(exc))
@@ -163,30 +173,61 @@ async def search(_, message):
         await message.reply_text("Usage: /search <title>")
         return
 
-    query = " ".join(message.command[1:])
-    status = await message.reply_text(f"🔎 Searching for <b>{html.escape(query)}</b>...", parse_mode="html")
-
+    query = " ".join(message.command[1:]).strip()
+    status = await message.reply_text(
+        f"🔎 Searching local catalog for <b>{html.escape(query)}</b>...",
+        parse_mode="html",
+    )
     try:
-        results = await asyncio.to_thread(provider.search, query)
-
-        if not results:
-            await status.edit_text("No matching episodes found.")
+        like = "%" + query.replace("%", "\%").replace("_", "\_") + "%"
+        rows = await asyncio.to_thread(
+            db_rows,
+            "SELECT url FROM posts WHERE title LIKE ? ESCAPE '\\' "
+            "OR synopsis LIKE ? ESCAPE '\\' ORDER BY id DESC LIMIT 20",
+            (like, like),
+        )
+        if not rows:
+            await status.edit_text("No matching posts in local catalog.")
             return
-
-        await status.edit_text(f"Found {len(results)} result(s). Loading...")
-
-        for item in results[:10]:
+        await status.edit_text(f"Found {len(rows)} result(s). Loading...")
+        for (url,) in rows[:10]:
             try:
-                ep = await asyncio.to_thread(
-                    provider.get_episode, item["page_url"], True
-                )
+                ep = await asyncio.to_thread(provider.get_episode, url, True)
                 await show(message, ep)
             except Exception as exc:
                 await message.reply_text("⚠️ Could not load result: " + str(exc))
-
         await status.delete()
     except Exception as exc:
         await status.edit_text("❌ " + str(exc))
+
+
+@app.on_message(filters.command("stats"))
+async def stats(_, message):
+    try:
+        row = await asyncio.to_thread(
+            db_rows,
+            "SELECT COUNT(*), SUM(CASE WHEN published=1 THEN 1 ELSE 0 END) FROM posts",
+        )
+        total, published = row[0]
+        await message.reply_text(
+            f"📊 <b>Catalog</b>\n\n"
+            f"Posts: <b>{total or 0}</b>\n"
+            f"Published: <b>{published or 0}</b>",
+            parse_mode="html",
+        )
+    except Exception as exc:
+        await message.reply_text("❌ " + str(exc))
+
+
+@app.on_message(filters.command("crawl"))
+async def crawl_command(_, message):
+    status = await message.reply_text("🕷 Starting catalog import: pages 1-121...")
+    try:
+        from crawler.catalog import crawl
+        await asyncio.to_thread(crawl, 121, 0.25)
+        await status.edit_text("✅ Catalog import completed.")
+    except Exception as exc:
+        await status.edit_text("❌ Crawl failed: " + str(exc))
 
 
 @app.on_message(filters.command("episode"))
@@ -202,7 +243,6 @@ async def episode(_, message):
         await show(message, ep)
     except Exception as exc:
         await message.reply_text("❌ " + str(exc))
-
 
 def format_time(seconds):
     seconds = int(max(seconds, 0))
