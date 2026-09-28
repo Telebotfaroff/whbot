@@ -558,7 +558,7 @@ async def download_command(_, message):
     )
 
 
-async def start_series_download(message, series_url, status=None):
+async def start_series_download(message, series_url, status=None, raise_on_error=False):
     if message is not None:
         DOWNLOAD_STATES.pop(message.chat.id, None)
 
@@ -653,6 +653,8 @@ async def start_series_download(message, series_url, status=None):
             )
     except Exception as exc:
         await safe_edit(status, "❌ Download failed: " + html.escape(str(exc)))
+        if raise_on_error:
+            raise
     finally:
         if owns_lock:
             AUTO_LOCK.release()
@@ -868,6 +870,7 @@ async def run_auto(status):
                 message=None,
                 series_url=series_url,
                 status=status,
+                raise_on_error=True,
             )
             completed += 1
 
@@ -998,33 +1001,3 @@ def scheduler_loop():
             print(
                 "[scheduler] added={}, published={}".format(added, published),
                 flush=True,
-            )
-        except Exception as exc:
-            print("[scheduler] check failed: {}".format(exc), flush=True)
-
-        time.sleep(CRAWL_INTERVAL)
-
-
-def start_background_scheduler():
-    if not SCHEDULER_ENABLED:
-        print("[scheduler] disabled (manual /crawl and /publish only)", flush=True)
-        return
-
-    thread = threading.Thread(
-        target=scheduler_loop,
-        name="catalog-scheduler",
-        daemon=True,
-    )
-    thread.start()
-    print(
-        "[scheduler] enabled: every {}s, pages={}, publish_limit={}".format(
-            CRAWL_INTERVAL, CRAWL_PAGES, PUBLISH_LIMIT
-        ),
-        flush=True,
-    )
-
-
-if __name__ == "__main__":
-    print("WHBot starting", flush=True)
-    start_background_scheduler()
-    app.run()
