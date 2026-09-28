@@ -18,7 +18,7 @@ from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from providers.watchhentai import WatchHentai, ProviderError
 from crawler.catalog import DB_PATH, init_db, crawl_series
-from publisher import publish_pending, publish_ids
+from publisher import publish_pending, publish_ids, publish_series_ids
 
 load_dotenv()
 
@@ -451,8 +451,9 @@ async def crawl_command(_, message):
     await message.reply_text(
         "🕷 <b>Catalog crawler</b>\n\n"
         "Send the <b>starting series page number</b>.\n"
-        "Use <b>0</b> for https://watchhentai.net/series/.\n"
-        "Example: <code>0</code>"
+        "<b>1</b> = the first series page.\n"
+        "<b>2</b> = the second series page.\n"
+        "Example: <code>1</code>"
     )
 
 
@@ -471,11 +472,11 @@ async def crawl_input(_, message):
 
     try:
         value = int(message.text.strip())
-        if value < 0:
+        if value < 1:
             raise ValueError
     except ValueError:
         await message.reply_text(
-            "❌ Send a whole number such as <b>0</b>, <b>7</b> or <b>121</b>."
+            "❌ Send a whole number starting from <b>1</b>, such as <b>1</b>, <b>7</b> or <b>121</b>."
         )
         return
 
@@ -500,8 +501,9 @@ async def crawl_input(_, message):
 
     status = await message.reply_text(
         "🕷 <b>Crawling series pages {} → {}</b>\n"
-        "0 = /series/; other numbers = /series/page/N/\n\n"
-        "Each series page will be inspected for name, thumbnail and total episodes.".format(
+        "1 = /series/; 2+ = /series/page/N/\n\n"
+        "Each series is saved with its thumbnail, title, episode count, series URL and all episode URLs.\n"
+        "New series are then published to the configured Telegram channel.".format(
             start_page, end_page
         )
     )
@@ -512,16 +514,25 @@ async def crawl_input(_, message):
                 crawl_series, start_page, end_page, 0.25
             )
 
+            new_series_ids = result.get("new_ids", [])
+            published = 0
+            if new_series_ids:
+                published = await asyncio.to_thread(
+                    publish_series_ids, new_series_ids
+                )
+
         await status.edit_text(
             "✅ <b>Series crawl completed</b>\n\n"
             "Pages: <b>{} → {}</b>\n"
             "Series processed: <b>{}</b>\n"
-            "New series: <b>{}</b>\n\n"
-            "Saved: name, thumbnail, series URL and total episodes.".format(
+            "New series saved: <b>{}</b>\n"
+            "Published to channel: <b>{}</b>\n\n"
+            "Saved data: title, thumbnail, episode count, series URL and all episode URLs.".format(
                 start_page,
                 end_page,
                 result.get("processed", 0),
                 len(result.get("new_ids", [])),
+                published,
             )
         )
     except Exception as exc:
