@@ -850,50 +850,47 @@ async def run_auto(status):
     await AUTO_LOCK.acquire()
     try:
         for index, row in enumerate(rows, 1):
-        if AUTO_STOP.is_set():
-            await status.edit_text(
-                f"⏹ <b>Series auto downloader stopped.</b>\n"
-                f"Completed: <b>{completed}/{total}</b>"
-            )
-            return
+            if AUTO_STOP.is_set():
+                await status.edit_text(
+                    f"⏹ <b>Series auto downloader stopped.</b>\n"
+                    f"Completed: <b>{completed}/{total}</b>"
+                )
+                return
 
-        series_id, series_url, series_name, episode_total = row
-
-        await safe_edit(
-            status,
-            f"🤖 <b>Auto series downloader</b>\n"
-            f"Series: <b>{html.escape(series_name or series_url)}</b>\n"
-            f"Series queue: <b>{index}/{total}</b>\n"
-            f"Episodes: <b>{episode_total or '?'}</b>"
-        )
-
-        try:
-            # Reuse the exact same bulk downloader used by /download.
-            # It resolves the series, finds every episode, selects the best
-            # available quality and uploads the complete series sequentially.
-            await start_series_download(
-                message=None,
-                series_url=series_url,
-                status=status,
-                raise_on_error=True,
-                acquire_lock=False,
-            )
-            completed += 1
+            series_id, series_url, series_name, episode_total = row
 
             await safe_edit(
                 status,
-                f"✅ <b>Series {completed}/{total} completed</b>\n"
-                f"{html.escape(series_name or series_url)}"
+                f"🤖 <b>Auto series downloader</b>\n"
+                f"Series: <b>{html.escape(series_name or series_url)}</b>\n"
+                f"Series queue: <b>{index}/{total}</b>\n"
+                f"Episodes: <b>{episode_total or '?'}</b>"
             )
-        except Exception as exc:
-            await safe_edit(
-                status,
-                f"⚠️ <b>Series failed</b>\n"
-                f"{html.escape(series_name or series_url)}\n"
-                f"{html.escape(str(exc))}\n\n"
-                f"Continuing: <b>{completed}/{total}</b>"
-            )
-            await asyncio.sleep(1)
+
+            try:
+                await start_series_download(
+                    message=None,
+                    series_url=series_url,
+                    status=status,
+                    raise_on_error=True,
+                    acquire_lock=False,
+                )
+                completed += 1
+
+                await safe_edit(
+                    status,
+                    f"✅ <b>Series {completed}/{total} completed</b>\n"
+                    f"{html.escape(series_name or series_url)}"
+                )
+            except Exception as exc:
+                await safe_edit(
+                    status,
+                    f"⚠️ <b>Series failed</b>\n"
+                    f"{html.escape(series_name or series_url)}\n"
+                    f"{html.escape(str(exc))}\n\n"
+                    f"Continuing: <b>{completed}/{total}</b>"
+                )
+                await asyncio.sleep(1)
 
         await safe_edit(
             status,
@@ -998,11 +995,3 @@ def scheduler_loop():
             print("[scheduler] initial crawl failed: {}".format(exc), flush=True)
 
     while True:
-        try:
-            print(
-                "[scheduler] checking first {} page(s)...".format(CRAWL_PAGES),
-                flush=True,
-            )
-            with BACKGROUND_LOCK:
-                added = check_once(CRAWL_PAGES)
-                published = publish_pending(PUBLISH_LIMIT)
