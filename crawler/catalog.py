@@ -146,14 +146,33 @@ def crawl_series(start_page=1, end_page=None, delay=0.25, on_series=None, on_pro
                     episode_items = provider.series_episodes(url)
                     episode_urls = [item["page_url"] for item in episode_items]
 
-                    # The episode links are part of the series record. We do
-                    # not open every episode page or resolve video sources here.
+                    # Keep the series record as the fast catalog, but also
+                    # index its episode pages into posts. This makes /latest,
+/search and /stats useful after a /crawl without resolving video sources.
                     series["episode_urls"] = episode_urls
                     series["total_episodes"] = (
                         series.get("total_episodes") or len(episode_urls)
                     )
 
                     save_series(con, series, episode_urls)
+
+                    episode_indexed = 0
+                    for episode_item in episode_items:
+                        episode_url = episode_item["page_url"]
+                        try:
+                            # Metadata only: source resolution is intentionally
+                            # disabled during crawling to keep the crawl fast.
+                            ep = provider.get_episode(episode_url, False)
+                            save_episode(con, ep)
+                            episode_indexed += 1
+                        except Exception as episode_exc:
+                            print(
+                                "    ! episode index failed {}: {}".format(
+                                    episode_url, episode_exc
+                                ),
+                                flush=True,
+                            )
+
                     con.commit()
 
                     row = con.execute(
