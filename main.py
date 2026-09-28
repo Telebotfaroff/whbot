@@ -69,13 +69,47 @@ def enc(value):
     import hashlib
     token = hashlib.sha256(value.encode()).hexdigest()[:12]
     CALLBACK_URLS[token] = value
+
+    # Persist callback mappings so buttons continue working after a Colab/bot
+    # restart. The in-memory cache is still used for fast access.
+    con = init_db()
+    try:
+        con.execute(
+            "CREATE TABLE IF NOT EXISTS callback_urls ("
+            "token TEXT PRIMARY KEY, value TEXT NOT NULL)"
+        )
+        con.execute(
+            "INSERT OR REPLACE INTO callback_urls(token, value) VALUES (?, ?)",
+            (token, value),
+        )
+        con.commit()
+    finally:
+        con.close()
+
     return token
 
 
 def dec(value):
-    if value not in CALLBACK_URLS:
+    if value in CALLBACK_URLS:
+        return CALLBACK_URLS[value]
+
+    con = init_db()
+    try:
+        con.execute(
+            "CREATE TABLE IF NOT EXISTS callback_urls ("
+            "token TEXT PRIMARY KEY, value TEXT NOT NULL)"
+        )
+        row = con.execute(
+            "SELECT value FROM callback_urls WHERE token=?",
+            (value,),
+        ).fetchone()
+    finally:
+        con.close()
+
+    if not row:
         raise RuntimeError("This button has expired. Open the episode again.")
-    return CALLBACK_URLS[value]
+    CALLBACK_URLS[value] = row[0]
+    return row[0]
 
 
 def format_duration(seconds):
