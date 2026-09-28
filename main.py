@@ -41,6 +41,9 @@ MAX_UPLOAD_BYTES = 2 * 1024 * 1024 * 1024
 # Small pause before each Telegram media upload to reduce request bursts.
 TELEGRAM_UPLOAD_DELAY = float(os.getenv("TELEGRAM_UPLOAD_DELAY", "3.0"))
 TELEGRAM_PROGRESS_INTERVAL = max(float(os.getenv("TELEGRAM_PROGRESS_INTERVAL", "4.0")), 2.0)
+# Pyrogram uploads files in parallel chunks. Increase this for better throughput.
+# Keep it configurable because very high values can trigger Telegram flood control.
+MAX_CONCURRENT_TRANSMISSIONS = max(int(os.getenv("MAX_CONCURRENT_TRANSMISSIONS", "4")), 1)
 CALLBACK_URLS = {}
 AUTO_LOCK = asyncio.Lock()
 AUTO_STOP = threading.Event()
@@ -54,6 +57,7 @@ app = Client(
     bot_token=BOT_TOKEN,
     workdir=str(PYROGRAM_WORKDIR),
     parse_mode=ParseMode.HTML,
+    max_concurrent_transmissions=MAX_CONCURRENT_TRANSMISSIONS,
 )
 provider = WatchHentai()
 
