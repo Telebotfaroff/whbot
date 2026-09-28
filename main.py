@@ -17,7 +17,7 @@ from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from providers.watchhentai import WatchHentai, ProviderError
 from crawler.catalog import DB_PATH, init_db
-from publisher import publish_pending
+from publisher import publish_pending, publish_ids
 
 load_dotenv()
 
@@ -39,6 +39,7 @@ MAX_UPLOAD_BYTES = 2 * 1024 * 1024 * 1024
 CALLBACK_URLS = {}
 AUTO_LOCK = asyncio.Lock()
 AUTO_STOP = threading.Event()
+CRAWL_STATES = {}
 
 app = Client(
     "whbot",
@@ -335,7 +336,7 @@ async def help_command(_, message):
         "/episode &lt;URL&gt; — open a specific episode\n\n"
         "⚙️ <b>Catalog</b>\n"
         "/stats — catalog statistics\n"
-        "/crawl — import pages 1–121 manually\n"
+        "/crawl — choose start/end pages and import them manually\n"
         "/publish — publish catalog metadata\n\n"
         "🤖 <b>Auto uploader</b>\n"
         "/auto — download and upload all pending episodes sequentially\n"
@@ -434,14 +435,91 @@ async def stats(_, message):
 
 @app.on_message(filters.command("crawl"))
 async def crawl_command(_, message):
-    status = await message.reply_text("🕷 Starting manual catalog import: pages 1–121...")
+    CRAWL_STATES[message.chat.id] = {"stage": "start"}
+    await message.reply_text(
+        "🕷 <b>Catalog crawler</b>\n\n"
+        "Send the <b>starting page number</b>.\n"
+        "Use <b>0</b> for https://watchhentai.net/videos/.\n"
+        "Example: <code>0</code>"
+    )
+
+
+@app.on_message(filters.text)
+async def crawl_input(_, message):
+    state = CRAWL_STATES.get(message.chat.id)
+    if not state or message.text.startswith("/"):
+        return
+
+    try:
+        value = int(message.text.strip())
+        if value < 0:
+            raise ValueError
+    except ValueError:
+        await message.reply_text(
+            "❌ Send a whole number such as <b>0</b>, <b>7</b> or <b>121</b>."
+        )
+        return
+
+    if state["stage"] == "start":
+        state["start"] = value
+        state["stage"] = "end"
+        await message.reply_text(
+            "✅ Starting page: <b>{}</b>\n\n"
+            "Now send the <b>ending page number</b>.\n"
+            "It must be greater than or equal to the starting page.".format(value)
+        )
+        return
+
+    start_page = state["start"]
+    end_page = value
+
+    if end_page < start_page:
+        await message.reply_text("❌ Ending page cannot be smaller than starting page.")
+        return
+
+    CRAWL_STATES.pop(message.chat.id, None)
+
+    status = await message.reply_text(
+        "🕷 <b>Crawling pages {} → {}</b>\n"
+        "0 = /videos/; other numbers = /videos/page/N/\n\n"
+        "Every discovered post will be resolved completely before it is saved.".format(
+            start_page, end_page
+        )
+    )
+
     try:
         from crawler.catalog import crawl
+
         with BACKGROUND_LOCK:
-            await asyncio.to_thread(crawl, 121, 0.25)
-        await status.edit_text("✅ Catalog import completed.")
+            result = await asyncio.to_thread(crawl, start_page, end_page, 0.25)
+
+        new_ids = result.get("new_ids", [])
+        published = 0
+
+        if new_ids:
+            await status.edit_text(
+                "📢 Crawl complete. Publishing {} newly crawled post(s)...".format(
+                    len(new_ids)
+                )
+            )
+            with BACKGROUND_LOCK:
+                published = await asyncio.to_thread(publish_ids, new_ids)
+
+        await status.edit_text(
+            "✅ <b>Crawl completed</b>\n\n"
+            "Pages: <b>{} → {}</b>\n"
+            "Posts processed: <b>{}</b>\n"
+            "New posts: <b>{}</b>\n"
+            "Channel posts published: <b>{}</b>".format(
+                start_page,
+                end_page,
+                result.get("processed", 0),
+                len(new_ids),
+                published,
+            )
+        )
     except Exception as exc:
-        await status.edit_text("❌ Crawl failed: " + str(exc))
+        await status.edit_text("❌ Crawl failed: " + html.escape(str(exc)))
 
 
 @app.on_message(filters.command("publish"))
