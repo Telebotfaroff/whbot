@@ -206,16 +206,15 @@ class WatchHentai:
 
         thumb = self._meta(html, "og:image")
 
-        # The series page exposes the episode list and an explicit episode
-        # count in the page metadata. Prefer that count, then fall back to
-        # distinct episode links if the metadata is unavailable.
-        total = None
-        m = re.search(r'([0-9]+)\s+Episodes', html, re.I)
-        if m:
-            total = int(m.group(1))
+        # The actual episode links are authoritative. Some series pages
+        # expose a stale/partial "N Episodes" metadata value, so never use
+        # that value when we successfully collected episode links.
         episode_links = self._episode_links(html)
-        if total is None:
+        if episode_links:
             total = len(episode_links)
+        else:
+            m = re.search(r'([0-9]+)\s+Episodes', html, re.I)
+            total = int(m.group(1)) if m else 0
 
         return {
             "provider": "watchhentai",
