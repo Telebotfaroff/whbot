@@ -8,7 +8,7 @@ This branch is designed for **Google Colab**.
 
 ### Open in Google Colab
 
-[![Open in Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/Telebotfaroff/whbot/blob/colab-ready/WHBot_Colab.ipynb)
+[![Open in Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/Telebotfaroff/whbot/blob/recovered-colab/WHBot_Colab.ipynb)
 
 The notebook is designed to:
 1. Mount Google Drive.
@@ -80,7 +80,7 @@ This keeps the SQLite catalog and downloaded files across Colab runtime restarts
 If running manually:
 
 ```bash
-git clone -b colab-ready https://github.com/Telebotfaroff/whbot.git
+git clone -b recovered-colab https://github.com/Telebotfaroff/whbot.git
 cd whbot
 pip install -r requirements.txt
 python main.py
