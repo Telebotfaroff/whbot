@@ -132,6 +132,8 @@ def crawl_series(start_page=1, end_page=None, delay=0.25, on_series=None, on_pro
                 continue
 
             print("  found {} series URLs".format(len(items)), flush=True)
+            if on_progress:
+                on_progress(page, end_page, processed, len(new_ids), None)
 
             for item in items:
                 url = item["series_url"]
@@ -176,6 +178,8 @@ def crawl_series(start_page=1, end_page=None, delay=0.25, on_series=None, on_pro
                             row[0] if row else None,
                             is_new,
                         )
+                    if on_progress:
+                        on_progress(page, end_page, processed, len(new_ids), series)
 
                 except Exception as exc:
                     con.rollback()
