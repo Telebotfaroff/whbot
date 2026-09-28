@@ -344,7 +344,8 @@ async def help_command(_, message):
         "/episode &lt;URL&gt; — open a specific episode\n\n"
         "⚙️ <b>Catalog</b>\n"
         "/stats — catalog statistics\n"
-        "/crawl — choose start/end pages and import them manually\n"
+        "/crawl — crawl series pages into the catalog\n"
+        "/download — download an entire series to the download channel\n"
         "/publish — publish catalog metadata\n\n"
         "🤖 <b>Auto uploader</b>\n"
         "/auto — download and upload all pending episodes sequentially\n"
@@ -362,7 +363,8 @@ async def start(_, message):
         "/search <query> - search local catalog\n"
         "/episode <URL> - open an episode\n"
         "/stats - catalog statistics\n"
-        "/crawl - manual catalog import\n"
+        "/crawl - crawl series catalog\n"
+        "/download - download a complete series to the download channel\n"
         "/publish - publish catalog metadata\n"
         "/auto - sequentially upload pending episodes"
     )
@@ -454,8 +456,15 @@ async def crawl_command(_, message):
 
 @app.on_message(filters.text)
 async def crawl_input(_, message):
+    if message.text.startswith("/"):
+        return
+
+    if DOWNLOAD_STATES.get(message.chat.id):
+        await start_series_download(message, message.text.strip())
+        return
+
     state = CRAWL_STATES.get(message.chat.id)
-    if not state or message.text.startswith("/"):
+    if not state:
         return
 
     try:
