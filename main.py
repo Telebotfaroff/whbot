@@ -13,7 +13,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 from pyrogram import Client, filters
 from pyrogram.enums import ParseMode
-from pyrogram.errors import RPCError
+from pyrogram.errors import FloodWait, RPCError
 from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from providers.watchhentai import WatchHentai, ProviderError
@@ -39,7 +39,8 @@ PYROGRAM_WORKDIR.mkdir(parents=True, exist_ok=True)
 
 MAX_UPLOAD_BYTES = 2 * 1024 * 1024 * 1024
 # Small pause before each Telegram media upload to reduce request bursts.
-TELEGRAM_UPLOAD_DELAY = float(os.getenv("TELEGRAM_UPLOAD_DELAY", "2.0"))
+TELEGRAM_UPLOAD_DELAY = float(os.getenv("TELEGRAM_UPLOAD_DELAY", "3.0"))
+TELEGRAM_PROGRESS_INTERVAL = max(float(os.getenv("TELEGRAM_PROGRESS_INTERVAL", "4.0")), 2.0)
 CALLBACK_URLS = {}
 AUTO_LOCK = asyncio.Lock()
 AUTO_STOP = threading.Event()
@@ -364,20 +365,41 @@ async def download_and_send(
             await status.edit_text("📤 Uploading video to Telegram...")
 
         started = time.monotonic()
+        print("[upload] waiting {}s before Telegram upload".format(TELEGRAM_UPLOAD_DELAY), flush=True)
+        await asyncio.sleep(TELEGRAM_UPLOAD_DELAY)
         print("[upload] sending {} to chat {}".format(output.name, target_chat), flush=True)
-        sent = await app.send_video(
-            chat_id=target_chat,
-            video=str(output),
-            thumb=str(thumb_path) if thumb_path else None,
-            caption=caption,
-            duration=duration or None,
-            width=metadata["width"] or None,
-            height=metadata["height"] or None,
-            file_name=output.name,
-            supports_streaming=True,
-            progress=upload_progress,
-            progress_args=(status, started),
-        )
+
+        sent = None
+        for upload_attempt in range(1, 4):
+            try:
+                sent = await app.send_video(
+                    chat_id=target_chat,
+                    video=str(output),
+                    thumb=str(thumb_path) if thumb_path else None,
+                    caption=caption,
+                    duration=duration or None,
+                    width=metadata["width"] or None,
+                    height=metadata["height"] or None,
+                    file_name=output.name,
+                    supports_streaming=True,
+                    progress=upload_progress,
+                    progress_args=(status, started),
+                )
+                break
+            except FloodWait as exc:
+                wait = max(int(getattr(exc, "value", 0) or 0), 1)
+                print(
+                    "[upload] Telegram FloodWait={}s attempt {}/3".format(
+                        wait, upload_attempt
+                    ),
+                    flush=True,
+                )
+                if upload_attempt >= 3:
+                    raise
+                await asyncio.sleep(wait + 1)
+
+        if sent is None:
+            raise ProviderError("Telegram upload did not return a message")
 
         print("[upload] Telegram message id={}".format(sent.id), flush=True)
         if post_id is not None:
@@ -989,7 +1011,7 @@ async def upload_progress(current, total, status, started):
         return
     now = time.monotonic()
     last = getattr(upload_progress, "_last", 0.0)
-    if now - last < 1.0 and current < total:
+    if now - last < TELEGRAM_PROGRESS_INTERVAL and current < total:
         return
     upload_progress._last = now
     await safe_edit(
