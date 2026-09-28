@@ -16,7 +16,7 @@ from pyrogram.errors import RPCError
 from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from providers.watchhentai import WatchHentai, ProviderError
-from crawler.catalog import DB_PATH, init_db
+from crawler.catalog import DB_PATH, init_db, crawl_series
 from publisher import publish_pending, publish_ids
 
 load_dotenv()
@@ -441,8 +441,8 @@ async def crawl_command(_, message):
     CRAWL_STATES[message.chat.id] = {"stage": "start"}
     await message.reply_text(
         "🕷 <b>Catalog crawler</b>\n\n"
-        "Send the <b>starting page number</b>.\n"
-        "Use <b>0</b> for https://watchhentai.net/videos/.\n"
+        "Send the <b>starting series page number</b>.\n"
+        "Use <b>0</b> for https://watchhentai.net/series/.\n"
         "Example: <code>0</code>"
     )
 
@@ -483,46 +483,33 @@ async def crawl_input(_, message):
     CRAWL_STATES.pop(message.chat.id, None)
 
     status = await message.reply_text(
-        "🕷 <b>Crawling pages {} → {}</b>\n"
-        "0 = /videos/; other numbers = /videos/page/N/\n\n"
-        "Every discovered post will be resolved completely before it is saved.".format(
+        "🕷 <b>Crawling series pages {} → {}</b>\n"
+        "0 = /series/; other numbers = /series/page/N/\n\n"
+        "Each series page will be inspected for name, thumbnail and total episodes.".format(
             start_page, end_page
         )
     )
 
     try:
-        from crawler.catalog import crawl
-
         with BACKGROUND_LOCK:
-            result = await asyncio.to_thread(crawl, start_page, end_page, 0.25)
-
-        new_ids = result.get("new_ids", [])
-        published = 0
-
-        if new_ids:
-            await status.edit_text(
-                "📢 Crawl complete. Publishing {} newly crawled post(s)...".format(
-                    len(new_ids)
-                )
+            result = await asyncio.to_thread(
+                crawl_series, start_page, end_page, 0.25
             )
-            with BACKGROUND_LOCK:
-                published = await asyncio.to_thread(publish_ids, new_ids)
 
         await status.edit_text(
-            "✅ <b>Crawl completed</b>\n\n"
+            "✅ <b>Series crawl completed</b>\n\n"
             "Pages: <b>{} → {}</b>\n"
-            "Posts processed: <b>{}</b>\n"
-            "New posts: <b>{}</b>\n"
-            "Channel posts published: <b>{}</b>".format(
+            "Series processed: <b>{}</b>\n"
+            "New series: <b>{}</b>\n\n"
+            "Saved: name, thumbnail, series URL and total episodes.".format(
                 start_page,
                 end_page,
                 result.get("processed", 0),
-                len(new_ids),
-                published,
+                len(result.get("new_ids", [])),
             )
         )
     except Exception as exc:
-        await status.edit_text("❌ Crawl failed: " + html.escape(str(exc)))
+        await status.edit_text("❌ Series crawl failed: " + html.escape(str(exc)))
 
 
 @app.on_message(filters.command("publish"))
