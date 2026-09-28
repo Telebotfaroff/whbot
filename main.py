@@ -267,6 +267,7 @@ async def download_and_send(
             source["url"],
             output,
             download_progress_factory(status) if status else None,
+            ep.get("page_url"),
         )
 
         size = output.stat().st_size
