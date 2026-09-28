@@ -852,8 +852,8 @@ async def download_series(
             else:
                 await app.send_message(DOWNLOAD_CHANNEL_ID, header_text)
         except Exception as exc:
+            # A header failure should not hide the actual episode download error.
             print("[series header] {}".format(exc), flush=True)
-            await app.send_message(DOWNLOAD_CHANNEL_ID, header_text)
 
         def episode_number(item):
             m = re.search(r"episode[-\s]+(\d+)", item["page_url"], re.I)
