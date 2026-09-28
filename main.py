@@ -734,76 +734,79 @@ def download_progress_factory(status):
     return progress
 
 
-async def run_auto(status, preferred_quality=None):
-    if not CHANNEL_ID:
-        raise RuntimeError("CHANNEL_ID is required for /auto")
+async def run_auto(status):
+    if not DOWNLOAD_CHANNEL_ID:
+        raise RuntimeError("DOWNLOAD_CHANNEL_ID is required for /auto")
 
     con = init_db()
     try:
         rows = con.execute(
-            """SELECT id,url,title,episode,synopsis,thumbnail,series_url,
-                      video_uploaded
-               FROM posts
-               WHERE video_uploaded=0
-               ORDER BY COALESCE(series_url, url) ASC,
-                        CASE WHEN episode IS NULL THEN 2147483647 ELSE episode END ASC,
-                        id ASC"""
+            """SELECT id,url,name,total_episodes
+               FROM series
+               ORDER BY id ASC"""
         ).fetchall()
     finally:
         con.close()
 
     if not rows:
-        await status.edit_text("✅ Auto queue is empty. All catalog videos are uploaded.")
+        await status.edit_text(
+            "✅ Series auto queue is empty. Run /crawl first."
+        )
         return
 
     AUTO_STOP.clear()
     total = len(rows)
     completed = 0
-    current_series = None
 
     for index, row in enumerate(rows, 1):
         if AUTO_STOP.is_set():
             await status.edit_text(
-                f"⏹ Auto uploader stopped. Completed {completed}/{total}."
+                f"⏹ <b>Series auto downloader stopped.</b>\n"
+                f"Completed: <b>{completed}/{total}</b>"
             )
             return
 
-        post_id, url, title, episode_number, synopsis, thumbnail, series_url, _ = row
-        series_key = series_url or url
+        series_id, series_url, series_name, episode_total = row
 
-        if series_key != current_series:
-            current_series = series_key
-            await status.edit_text(
-                f"🤖 <b>Auto uploader</b>\n"
-                f"Series: <b>{html.escape(series_key.rsplit('/', 1)[-1].replace('-', ' '))}</b>\n"
-                f"Queue: {index}/{total}"
-            )
+        await safe_edit(
+            status,
+            f"🤖 <b>Auto series downloader</b>\n"
+            f"Series: <b>{html.escape(series_name or series_url)}</b>\n"
+            f"Series queue: <b>{index}/{total}</b>\n"
+            f"Episodes: <b>{episode_total or '?'}</b>"
+        )
 
         try:
-            ep = await asyncio.to_thread(provider.get_episode, url, True)
-            await download_and_send(
-                ep,
-                CHANNEL_ID,
-                preferred_quality=preferred_quality,
+            # Reuse the exact same bulk downloader used by /download.
+            # It resolves the series, finds every episode, selects the best
+            # available quality and uploads the complete series sequentially.
+            await start_series_download(
+                message=None,
+                series_url=series_url,
                 status=status,
-                post_id=post_id,
+                update_status=False,
             )
             completed += 1
-            await status.edit_text(
-                f"✅ Uploaded <b>{html.escape(ep['title'])}</b>\n"
-                f"Progress: <b>{completed}/{total}</b>"
+
+            await safe_edit(
+                status,
+                f"✅ <b>Series {completed}/{total} completed</b>\n"
+                f"{html.escape(series_name or series_url)}"
             )
         except Exception as exc:
-            await status.edit_text(
-                f"⚠️ Failed <b>{html.escape(title or url)}</b>\n"
-                f"{html.escape(str(exc))}\n"
-                f"Progress: {completed}/{total}. Continuing..."
+            await safe_edit(
+                status,
+                f"⚠️ <b>Series failed</b>\n"
+                f"{html.escape(series_name or series_url)}\n"
+                f"{html.escape(str(exc))}\n\n"
+                f"Continuing: <b>{completed}/{total}</b>"
             )
             await asyncio.sleep(1)
 
-    await status.edit_text(
-        f"🎉 <b>Auto uploader finished</b>\n"
-        f"Uploaded: <b>{completed}/{total}</b>"
+    await safe_edit(
+        status,
+        f"🎉 <b>Series auto downloader finished</b>\n"
+        f"Completed: <b>{completed}/{total}</b>"
     )
 
 
@@ -812,24 +815,31 @@ async def auto_command(_, message):
     args = message.command[1:]
     if args and args[0].lower() == "stop":
         AUTO_STOP.set()
-        await message.reply_text("⏹ Auto uploader will stop after the current transfer.")
+        await message.reply_text(
+            "⏹ Series auto downloader will stop after the current series."
+        )
         return
 
-    preferred = args[0] if args else None
-    if preferred and preferred.lower() not in {"720p", "1080p", "1440p", "2160p"}:
-        await message.reply_text("Usage: /auto [720p|1080p|1440p|2160p] or /auto stop")
+    if args:
+        await message.reply_text(
+            "Usage: /auto or /auto stop\n"
+            "Quality is selected automatically at the highest available level."
+        )
         return
 
     if AUTO_LOCK.locked():
-        await message.reply_text("⚠️ Auto uploader is already running.")
+        await message.reply_text("⚠️ A download/upload job is already running.")
         return
 
-    status = await message.reply_text("🤖 Starting sequential auto uploader...")
+    status = await message.reply_text("🤖 Starting series auto downloader...")
+
     async with AUTO_LOCK:
         try:
-            await run_auto(status, preferred)
+            await run_auto(status)
         except Exception as exc:
-            await status.edit_text("❌ Auto uploader failed: " + str(exc))
+            await status.edit_text(
+                "❌ Series auto downloader failed: " + html.escape(str(exc))
+            )
 
 
 @app.on_callback_query()
