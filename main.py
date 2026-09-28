@@ -127,6 +127,21 @@ async def show(message, ep):
     )
 
 
+@app.on_message(filters.command("help"))
+async def help_command(_, message):
+    await message.reply_text(
+        "<b>WHBot Help</b>\n\n"
+        "🔎 <b>Browse</b>\n"
+        "/latest — latest catalog posts\n"
+        "/search &lt;query&gt; — search the local catalog\n"
+        "/episode &lt;URL&gt; — open a specific episode\n\n"
+        "⚙️ <b>Catalog</b>\n"
+        "/stats — catalog statistics\n"
+        "/crawl — import pages 1–121\n"
+        "/publish — publish pending channel posts\n\n"
+        "⬇️ Open an episode to view available qualities and use the download buttons."
+    , parse_mode="html")
+
 @app.on_message(filters.command("start"))
 async def start(_, message):
     await message.reply_text(
