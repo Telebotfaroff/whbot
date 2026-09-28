@@ -162,7 +162,11 @@ class WatchHentai:
         out = []
         for m in re.finditer(r'href=["\']([^"\']*/series/[^"\']+)["\']', html, re.I):
             url = self._absolute(m.group(1)).split("#")[0].rstrip("/")
-            if url.rstrip("/") == self.base + "/series" or url in seen:
+            if (
+                url.rstrip("/") == self.base + "/series"
+                or re.search(r"/series/page/\d+/?$", url, re.I)
+                or url in seen
+            ):
                 continue
             seen.add(url)
             out.append({"provider": "watchhentai", "series_url": url})
