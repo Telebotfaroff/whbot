@@ -4,7 +4,6 @@ import os
 import time
 import sqlite3
 import threading
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -434,31 +433,6 @@ async def callback(_, query):
         await query.message.reply_text("❌ " + str(exc))
 
 
-class HealthHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        if self.path not in ("/", "/health", "/healthz"):
-            self.send_response(404)
-            self.end_headers()
-            return
-        body = b"WHBot OK"
-        self.send_response(200)
-        self.send_header("Content-Type", "text/plain; charset=utf-8")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
-
-    def log_message(self, format, *args):
-        return
-
-
-def start_health_server():
-    server = ThreadingHTTPServer(("0.0.0.0", PORT), HealthHandler)
-    thread = threading.Thread(target=server.serve_forever, name="render-health", daemon=True)
-    thread.start()
-    print("[render] health server listening on port {}".format(PORT), flush=True)
-    return server
-
-
 def scheduler_loop():
     from crawler.scheduler import check_once
 
@@ -508,6 +482,5 @@ def start_background_scheduler():
 
 if __name__ == "__main__":
     print("WHBot starting", flush=True)
-    start_health_server()
     start_background_scheduler()
     app.run()
