@@ -278,29 +278,55 @@ async def episode(_, message):
         await message.reply_text("❌ " + str(exc))
 
 
+PROGRESS_BAR_LENGTH = 12
+PROGRESS_UPDATE_INTERVAL = 1.5
+
+
 def format_time(seconds):
     seconds = int(max(seconds, 0))
     if seconds < 60:
         return f"{seconds}s"
-    return f"{seconds // 60}m {seconds % 60}s"
+    if seconds < 3600:
+        return f"{seconds // 60}m {seconds % 60:02d}s"
+    return f"{seconds // 3600}h {(seconds % 3600) // 60:02d}m"
+
+
+def format_size(value):
+    if not value:
+        return "0 B"
+    units = ("B", "KB", "MB", "GB", "TB")
+    size = float(value)
+    for unit in units:
+        if size < 1024 or unit == units[-1]:
+            return f"{size:.1f} {unit}" if unit != "B" else f"{int(size)} B"
+        size /= 1024
+    return f"{size:.1f} TB"
+
+
+def progress_bar(percent):
+    percent = max(0.0, min(float(percent), 100.0))
+    filled = int(round(PROGRESS_BAR_LENGTH * percent / 100))
+    return "█" * filled + "░" * (PROGRESS_BAR_LENGTH - filled)
 
 
 def progress_text(prefix, current, total, started):
     elapsed = max(time.monotonic() - started, 0.001)
     speed = current / elapsed
-    percent = current * 100 / total if total else 0
-    eta = (total - current) / speed if total and speed else 0
+    percent = current * 100 / total if total else 0.0
+    eta = (total - current) / speed if total and speed > 0 else 0
 
-    size = f"{current / 1073741824:.2f}"
-    total_size = f"{total / 1073741824:.2f}" if total else "?"
-    speed_mb = speed / 1048576
+    bar = progress_bar(percent)
+    current_size = format_size(current)
+    total_size = format_size(total) if total else "?"
+    speed_size = format_size(speed) + "/s"
 
     return (
         f"{prefix}\n"
-        f"Progress: <b>{percent:.1f}%</b>\n"
-        f"Size: <b>{size} / {total_size} GB</b>\n"
-        f"Speed: <b>{speed_mb:.2f} MB/s</b>\n"
-        f"ETA: <b>{format_time(eta)}</b>"
+        f"<code>[{bar}] {percent:5.1f}%</code>\n"
+        f"📦 <b>{current_size}</b> / <b>{total_size}</b>\n"
+        f"⚡ <b>{speed_size}</b>\n"
+        f"⏱ <b>{format_time(elapsed)}</b> elapsed  •  "
+        f"🕐 <b>{format_time(eta)}</b> left"
     )
 
 
@@ -313,15 +339,19 @@ async def safe_edit(status, text):
 
 async def upload_progress(current, total, status, started):
     now = time.monotonic()
-    last = getattr(upload_progress, "_last", 0.0)
+    state = getattr(upload_progress, "_state", None)
+    if state is None:
+        state = upload_progress._state = {"last": 0.0, "started": started}
 
-    if now - last < 1.0 and current < total:
+    # Pyrogram can invoke progress very frequently; edit Telegram only
+    # when the interval has elapsed or the upload is complete.
+    if now - state["last"] < PROGRESS_UPDATE_INTERVAL and current < total:
         return
 
-    upload_progress._last = now
+    state["last"] = now
     await safe_edit(
         status,
-        progress_text("📤 Uploading...", current, total, started),
+        progress_text("📤 <b>Uploading to Telegram</b>", current, total, started),
     )
 
 
@@ -330,11 +360,16 @@ def download_progress_factory(status):
 
     def progress(current, total, started):
         now = time.monotonic()
-        if now - state["last"] < 1.0 and (not total or current < total):
+        if now - state["last"] < PROGRESS_UPDATE_INTERVAL and (not total or current < total):
             return
         state["last"] = now
 
-        text = progress_text("⬇️ Downloading...", current, total, started)
+        text = progress_text(
+            "⬇️ <b>Downloading video</b>",
+            current,
+            total,
+            started,
+        )
 
         asyncio.run_coroutine_threadsafe(
             safe_edit(status, text),
