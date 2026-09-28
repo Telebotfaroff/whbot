@@ -115,7 +115,9 @@ def video_metadata(path):
 
 
 def db_rows(query, params=()):
-    con = sqlite3.connect(DB_PATH, timeout=30)
+    # Ensure the SQLite schema exists before any read. This is important on a
+    # fresh Colab runtime where /latest may be the first database operation.
+    con = init_db()
     try:
         return con.execute(query, params).fetchall()
     finally:
