@@ -346,34 +346,90 @@ class WatchHentai:
         started = time.monotonic()
 
         headers = self._headers(referer or self.base + "/")
-        headers["Accept"] = "video/mp4,video/*;q=0.9,*/*;q=0.8"
-        with requests.get(
-            url,
-            headers=headers,
-            stream=True,
-            timeout=(30, 120),
-        ) as response:
-            if not response.ok:
-                raise ProviderError(f"Media HTTP {response.status_code}")
+        headers["Accept"] = (
+            "video/mp4,video/*;q=0.9,application/octet-stream;q=0.8,*/*;q=0.5"
+        )
 
-            content_type = response.headers.get("content-type", "").lower()
-            if "video" not in content_type and "octet-stream" not in content_type:
-                raise ProviderError(
-                    f"Media response is not video: {content_type or 'unknown'}"
-                )
-
-            total = int(response.headers.get("content-length") or 0)
-            current = 0
-
+        for attempt in range(1, 4):
             try:
-                with output.open("wb") as file:
-                    for chunk in response.iter_content(1024 * 1024):
-                        if not chunk:
+                with requests.get(
+                    url,
+                    headers=headers,
+                    stream=True,
+                    timeout=(30, 180),
+                    allow_redirects=True,
+                ) as response:
+                    code = response.status_code
+
+                    if code in {403, 408, 425, 429} or code >= 500:
+                        if attempt < 3:
+                            retry_after = response.headers.get("Retry-After")
+                            try:
+                                delay = min(float(retry_after), 15.0) if retry_after else float(attempt * 2)
+                            except (TypeError, ValueError):
+                                delay = float(attempt * 2)
+                            time.sleep(delay)
                             continue
-                        file.write(chunk)
-                        current += len(chunk)
-                        if progress:
-                            progress(current, total, started)
-            except Exception:
+                        raise ProviderError("Media HTTP {}".format(code))
+
+                    if not response.ok:
+                        raise ProviderError("Media HTTP {}".format(code))
+
+                    content_type = response.headers.get("content-type", "").lower()
+                    total = int(response.headers.get("content-length") or 0)
+                    current = 0
+
+                    try:
+                        with output.open("wb") as file:
+                            first_chunk = True
+                            for chunk in response.iter_content(1024 * 1024):
+                                if not chunk:
+                                    continue
+
+                                if first_chunk:
+                                    first_chunk = False
+                                    probe = chunk[:1024].lstrip().lower()
+                                    looks_html = (
+                                        probe.startswith(b"<html")
+                                        or probe.startswith(b"<!doctype")
+                                        or b"<html" in probe[:256]
+                                    )
+                                    looks_video_type = (
+                                        "video/" in content_type
+                                        or "octet-stream" in content_type
+                                        or "binary/octet-stream" in content_type
+                                    )
+                                    looks_mp4 = b"ftyp" in chunk[:1024]
+
+                                    if looks_html:
+                                        raise ProviderError(
+                                            "Media server returned HTML instead of video"
+                                        )
+                                    if not looks_video_type and not looks_mp4:
+                                        raise ProviderError(
+                                            "Media response is not a recognized video ({})".format(
+                                                content_type or "unknown"
+                                            )
+                                        )
+
+                                file.write(chunk)
+                                current += len(chunk)
+                                if progress:
+                                    progress(current, total, started)
+                    except Exception:
+                        output.unlink(missing_ok=True)
+                        raise
+
+                    if current <= 0:
+                        raise ProviderError("Media response was empty")
+
+                    return
+
+            except requests.RequestException as exc:
                 output.unlink(missing_ok=True)
-                raise
+                if attempt < 3:
+                    time.sleep(float(attempt * 2))
+                    continue
+                raise ProviderError("Media request failed: {}".format(exc)) from exc
+
+        raise ProviderError("Media download failed")
