@@ -628,14 +628,27 @@ async def start_series_download(message, series_url, status=None, raise_on_error
                 ),
             )
 
-            await app.send_photo(
-                DOWNLOAD_CHANNEL_ID,
-                series["thumbnail"],
-                caption=(
+            try:
+                header_text = (
                     f"🎬 <b>{html.escape(series['name'])}</b>\n"
                     f"📚 Total Episodes: <b>{total}</b>\n"
-                    f"🔗 <a href=\"{html.escape(series['series_url'], quote=True)}\">View Series</a>"
-                ),
+                    f"🔗 <a href="{html.escape(series['series_url'], quote=True)}">View Series</a>"
+                )
+                if series.get("thumbnail"):
+                    await app.send_photo(
+                        DOWNLOAD_CHANNEL_ID,
+                        series["thumbnail"],
+                        caption=header_text,
+                    )
+                else:
+                    await app.send_message(DOWNLOAD_CHANNEL_ID, header_text)
+            except Exception as exc:
+                print("[series header] {}".format(exc), flush=True)
+                await app.send_message(
+                    DOWNLOAD_CHANNEL_ID,
+                    header_text,
+                )
+
             )
 
             def episode_number(item):
@@ -980,20 +993,22 @@ async def callback(_, query):
         page_url = dec(encoded_page)
         label = dec(encoded_label)
         status = await query.message.reply_text(
-            f"⬇️ Resolving <b>{html.escape(label)}</b>..."
+            f"⬇️ <b>Preparing {html.escape(label)}</b>..."
         )
-        ep = await asyncio.to_thread(provider.get_episode, page_url, True)
 
-        available = {
-            str(source.get("label", "")).lower(): source
-            for source in (ep.get("sources") or [])
-        }
-        if label.lower() not in available:
-            raise ProviderError(
-                "Requested quality is not available. Available: "
-                + (", ".join(sorted(available)) or "none")
-            )
         try:
+            ep = await asyncio.to_thread(provider.get_episode, page_url, True)
+
+            available = {
+                str(source.get("label", "")).lower(): source
+                for source in (ep.get("sources") or [])
+            }
+            if label.lower() not in available:
+                raise ProviderError(
+                    "Requested quality is not available. Available: "
+                    + (", ".join(sorted(available)) or "none")
+                )
+
             await download_and_send(
                 ep,
                 query.message.chat.id,
@@ -1001,11 +1016,14 @@ async def callback(_, query):
                 status=status,
             )
             await status.delete()
-        except Exception:
-            raise
+        except Exception as exc:
+            await safe_edit(
+                status,
+                "❌ <b>Download failed</b>\n" + html.escape(str(exc)),
+            )
 
     except Exception as exc:
-        await query.message.reply_text("❌ " + str(exc))
+        await query.message.reply_text("❌ " + html.escape(str(exc)))
 
 
 def scheduler_loop():
