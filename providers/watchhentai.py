@@ -157,6 +157,57 @@ class WatchHentai:
             out.append({"provider": "watchhentai", "page_url": url})
         return out
 
+    def _series_links(self, html):
+        seen = set()
+        out = []
+        for m in re.finditer(r'href=["\']([^"\']*/series/[^"\']+)["\']', html, re.I):
+            url = self._absolute(m.group(1)).split("#")[0].rstrip("/")
+            if url.rstrip("/") == self.base + "/series" or url in seen:
+                continue
+            seen.add(url)
+            out.append({"provider": "watchhentai", "series_url": url})
+        return out
+
+    def _series_page(self, page):
+        url = self._absolute(page)
+        html = self._get(url)
+
+        title = self._meta(html, "og:title")
+        if title:
+            title = re.sub(r"\s*-\s*Watch Hentai.*$", "", title, flags=re.I).strip()
+        if not title:
+            m = re.search(r'<h1[^>]*>([^<]+)</h1>', html, re.I)
+            title = self._clean(m.group(1)) if m else url
+
+        thumb = self._meta(html, "og:image")
+
+        # The series page exposes the episode list and an explicit episode
+        # count in the page metadata. Prefer that count, then fall back to
+        # distinct episode links if the metadata is unavailable.
+        total = None
+        m = re.search(r'([0-9]+)\s+Episodes', html, re.I)
+        if m:
+            total = int(m.group(1))
+        episode_links = self._episode_links(html)
+        if total is None:
+            total = len(episode_links)
+
+        return {
+            "provider": "watchhentai",
+            "series_url": url,
+            "name": title,
+            "thumbnail": self._absolute(thumb) if thumb else None,
+            "total_episodes": total,
+        }
+
+    def series_latest(self, page=0):
+        url = self.base + "/series/" if page == 0 else f"{self.base}/series/page/{page}/"
+        html = self._get(url)
+        return self._series_links(html)
+
+    def get_series(self, series_url):
+        return self._series_page(series_url)
+
     def series_episodes(self, series_url):
         if not series_url:
             return []
