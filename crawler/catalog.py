@@ -1,15 +1,21 @@
 import argparse
+import os
 import sqlite3
 import time
 from pathlib import Path
 
+from dotenv import load_dotenv
 from providers.watchhentai import WatchHentai
 
-DB_PATH = Path("data/watchhentai.db")
+load_dotenv()
+
+DB_PATH = Path(os.getenv("WH_DB_PATH", "./data/watchhentai.db"))
+
 
 def init_db(db=DB_PATH):
+    db = Path(db)
     db.parent.mkdir(parents=True, exist_ok=True)
-    con = sqlite3.connect(db)
+    con = sqlite3.connect(db, timeout=30)
     con.execute("""CREATE TABLE IF NOT EXISTS posts (
         id INTEGER PRIMARY KEY, url TEXT UNIQUE NOT NULL, title TEXT,
         episode INTEGER, synopsis TEXT, thumbnail TEXT, series_url TEXT,
@@ -20,6 +26,7 @@ def init_db(db=DB_PATH):
     con.execute("CREATE INDEX IF NOT EXISTS idx_posts_url ON posts(url)")
     con.commit()
     return con
+
 
 def save_episode(con, ep):
     sources = {s["label"]: s["url"] for s in ep.get("sources", [])}
@@ -39,15 +46,16 @@ def save_episode(con, ep):
      nav.get("next"), ep.get("player_url"), sources.get("720p"),
      sources.get("1080p"), int(time.time())))
 
+
 def crawl(max_page=121, delay=0.25):
     provider = WatchHentai()
     con = init_db()
     total = 0
     try:
         for page in range(1, max_page + 1):
-            print("[page {}/{}] discovering posts...".format(page, max_page))
+            print("[page {}/{}] discovering posts...".format(page, max_page), flush=True)
             items = provider.latest(page)
-            print("  found {} episode URLs".format(len(items)))
+            print("  found {} episode URLs".format(len(items)), flush=True)
             for item in items:
                 url = item["page_url"]
                 if con.execute("SELECT 1 FROM posts WHERE url=?", (url,)).fetchone():
@@ -57,14 +65,16 @@ def crawl(max_page=121, delay=0.25):
                     save_episode(con, ep)
                     con.commit()
                     total += 1
-                    print("  + {}".format(ep["title"]))
+                    print("  + {}".format(ep["title"]), flush=True)
                 except Exception as exc:
-                    print("  ! {}: {}".format(url, exc))
+                    print("  ! {}: {}".format(url, exc), flush=True)
                 if delay:
                     time.sleep(delay)
     finally:
         con.close()
-    print("Imported {} new posts into {}".format(total, DB_PATH))
+    print("Imported {} new posts into {}".format(total, DB_PATH), flush=True)
+    return total
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
