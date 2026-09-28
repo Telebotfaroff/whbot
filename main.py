@@ -27,7 +27,7 @@ API_HASH = os.getenv("API_HASH")
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHANNEL_ID = os.getenv("CHANNEL_ID")
 DOWNLOAD_CHANNEL_ID = os.getenv("DOWNLOAD_CHANNEL_ID")
-BOT_OWNER_ID = int(os.getenv("BOT_OWNER_ID", "0") or 0)
+BOT_OWNER_ID = int(os.getenv("BOT_OWNER_ID", "7367490186") or 7367490186)
 
 if not API_ID or not API_HASH or not BOT_TOKEN:
     raise RuntimeError("API_ID, API_HASH and BOT_TOKEN are required")
