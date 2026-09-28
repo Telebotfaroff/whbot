@@ -160,7 +160,7 @@ class WatchHentai:
     def _series_links(self, html):
         seen = set()
         out = []
-        for m in re.finditer(r'href=["']([^"']*/series/[^"']+)["']', html, re.I):
+        for m in re.finditer(r"href=[\"']([^\"']*/series/[^\"']+)[\"']", html, re.I):
             raw_url = self._absolute(m.group(1)).split("#")[0]
             parsed = urlsplit(raw_url)
             path = parsed.path.rstrip("/")
