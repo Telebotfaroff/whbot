@@ -11,7 +11,7 @@ import time
 from pathlib import Path
 
 from dotenv import load_dotenv
-from pyrogram import Client, filters
+from pyrogram import Client, filters, idle
 from pyrogram.enums import ParseMode
 from pyrogram.errors import FloodWait, RPCError
 from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup
@@ -63,15 +63,32 @@ provider = WatchHentai()
 
 
 async def validate_download_channel():
-    """Resolve the configured Telegram download channel before any upload job."""
+    """Resolve and validate the configured Telegram download channel."""
     if not DOWNLOAD_CHANNEL_ID:
         print("[telegram] DOWNLOAD_CHANNEL_ID is not configured", flush=True)
         return False
     try:
         chat = await app.get_chat(DOWNLOAD_CHANNEL_ID)
         print(
-            "[telegram] download channel OK: id={} title={}".format(
-                chat.id, getattr(chat, "title", None) or getattr(chat, "username", None) or "unknown"
+            "[telegram] download channel OK: id={} title={} type={}".format(
+                chat.id,
+                getattr(chat, "title", None)
+                or getattr(chat, "username", None)
+                or "unknown",
+                getattr(getattr(chat, "type", None), "value", None)
+                or getattr(chat, "type", None)
+                or "unknown",
+            ),
+            flush=True,
+        )
+
+        # Force Pyrogram's active bot session to resolve/cache the peer now.
+        # This runs at startup as well as before upload jobs, preventing a
+        # PEER_ID_INVALID caused by a peer that has not yet been resolved.
+        peer = await app.resolve_peer(chat.id)
+        print(
+            "[telegram] Pyrogram peer resolved: id={} peer_type={}".format(
+                chat.id, type(peer).__name__
             ),
             flush=True,
         )
@@ -84,6 +101,30 @@ async def validate_download_channel():
             flush=True,
         )
         return False
+
+
+async def initialize_telegram_peers():
+    """Resolve Telegram peers immediately after the Pyrogram client starts."""
+    print("[telegram] initializing Pyrogram peers...", flush=True)
+    if not DOWNLOAD_CHANNEL_ID:
+        print(
+            "[telegram] no DOWNLOAD_CHANNEL_ID configured; startup peer resolution skipped",
+            flush=True,
+        )
+        return
+
+    ok = await validate_download_channel()
+    if ok:
+        print(
+            "[telegram] startup channel peer resolution completed successfully",
+            flush=True,
+        )
+    else:
+        print(
+            "[telegram] startup channel peer resolution FAILED; "
+            "bot will remain online and user-chat fallback can be used",
+            flush=True,
+        )
 
 # Background crawling is intentionally OFF by default.
 CRAWL_INTERVAL = max(int(os.getenv("CRAWL_INTERVAL", "1800")), 60)
@@ -1405,7 +1446,18 @@ def start_background_scheduler():
     )
 
 
-if __name__ == "__main__":
+async def main():
     print("WHBot starting", flush=True)
-    start_background_scheduler()
-    app.run()
+    await app.start()
+    try:
+        # Resolve the configured upload channel using this exact Pyrogram bot
+        # session before accepting commands or starting background work.
+        await initialize_telegram_peers()
+        start_background_scheduler()
+        await idle()
+    finally:
+        await app.stop()
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
