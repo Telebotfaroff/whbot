@@ -27,6 +27,8 @@ DOWNLOAD_DIR = Path(os.getenv("DOWNLOAD_DIR", "./downloads"))
 DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
 MAX_UPLOAD_BYTES = 2 * 1024 * 1024 * 1024
+# Small pause before each Telegram media upload to reduce request bursts.
+TELEGRAM_UPLOAD_DELAY = float(os.getenv("TELEGRAM_UPLOAD_DELAY", "2.0"))
 CALLBACK_URLS = {}
 
 app = Client(
@@ -402,6 +404,8 @@ async def callback(_, query):
                 return
 
             await status.edit_text("📤 Preparing Telegram upload...")
+            if TELEGRAM_UPLOAD_DELAY > 0:
+                await asyncio.sleep(TELEGRAM_UPLOAD_DELAY)
             started = time.monotonic()
 
             await app.send_video(
