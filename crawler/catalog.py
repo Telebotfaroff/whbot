@@ -67,10 +67,10 @@ def crawl(start_page=0, end_page=None, delay=0.25, on_episode=None):
 
     try:
         for page in range(start_page, end_page + 1):
-            site_page = 1 if page == 0 else page
+            site_page = page
             print("[page {}] discovering posts...".format(site_page), flush=True)
             try:
-                items = provider.latest(site_page)
+                items = provider.latest(page)
             except Exception as exc:
                 print("  ! page failed: {}".format(exc), flush=True)
                 continue
