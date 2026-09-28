@@ -720,7 +720,7 @@ async def download_command(_, message):
 
 
 async def resolve_series(series_url):
-    if not re.match(r"^https?://watchhentai\\.net/series/[^\\s]+/?$", series_url, re.I):
+    if not re.match(r"^https?://watchhentai\.net/series/[^\s]+/?$", series_url, re.I):
         raise ProviderError("Please send a valid WatchHentai series URL.")
 
     series = await asyncio.to_thread(provider.get_series, series_url)
@@ -737,10 +737,10 @@ async def resolve_series(series_url):
 async def show_series_preview(message, series, episode_items):
     total = series.get("total_episodes") or len(episode_items)
     caption = (
-        f"🎬 <b>{html.escape(series['name'])}</b>\\n"
-        f"📺 Episodes found: <b>{len(episode_items)}</b>\\n"
-        f"📚 Total Episodes: <b>{total}</b>\\n\\n"
-        "🔗 Episode pages have been collected.\\n"
+        f"🎬 <b>{html.escape(series['name'])}</b>\n"
+        f"📺 Episodes found: <b>{len(episode_items)}</b>\n"
+        f"📚 Total Episodes: <b>{total}</b>\n\n"
+        "🔗 Episode pages have been collected.\n"
         "⬇️ Press the button below to resolve each episode's actual video source and download it."
     )
     markup = InlineKeyboardMarkup(
@@ -805,15 +805,15 @@ async def download_series(
 
         await safe_edit(
             status,
-            "📚 <b>{}</b>\\nEpisodes found: <b>{}</b>\\n"
+            "📚 <b>{}</b>\nEpisodes found: <b>{}</b>\n"
             "🔗 Resolving video sources only when each episode is downloaded...".format(
                 html.escape(series["name"]), len(episode_items)
             ),
         )
 
         header_text = (
-            f"🎬 <b>{html.escape(series['name'])}</b>\\n"
-            f"📚 Total Episodes: <b>{total}</b>\\n"
+            f"🎬 <b>{html.escape(series['name'])}</b>\n"
+            f"📚 Total Episodes: <b>{total}</b>\n"
             f'🔗 <a href="{html.escape(series["series_url"], quote=True)}">View Series</a>'
         )
         try:
@@ -830,7 +830,7 @@ async def download_series(
             await app.send_message(DOWNLOAD_CHANNEL_ID, header_text)
 
         def episode_number(item):
-            m = re.search(r"episode[-\\s]+(\\d+)", item["page_url"], re.I)
+            m = re.search(r"episode[-\s]+(\d+)", item["page_url"], re.I)
             return int(m.group(1)) if m else 10**9
 
         episode_items.sort(key=episode_number)
@@ -916,8 +916,8 @@ async def download_series(
 
         await safe_edit(
             status,
-            "🎉 <b>Series download complete</b>\\n\\n"
-            f"{html.escape(series['name'])}\\n"
+            "🎉 <b>Series download complete</b>\n\n"
+            f"{html.escape(series['name'])}\n"
             f"Episodes: <b>{total}</b>",
         )
     except Exception as exc:
