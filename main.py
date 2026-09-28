@@ -392,8 +392,55 @@ async def download_and_send(
         thumb.unlink(missing_ok=True)
 
 
+@app.on_message(filters.command("ping"))
+async def ping_command(_, message):
+    print("[command] /ping chat_id={}".format(message.chat.id), flush=True)
+    await message.reply_text("🏓 <b>WHBot is responding.</b>")
+
+
+@app.on_message(filters.command("debug"))
+async def debug_command(_, message):
+    print("[command] /debug chat_id={}".format(message.chat.id), flush=True)
+    try:
+        con = init_db()
+        try:
+            posts = con.execute("SELECT COUNT(*) FROM posts").fetchone()[0]
+            series = con.execute("SELECT COUNT(*) FROM series").fetchone()[0]
+        finally:
+            con.close()
+
+        await message.reply_text(
+            "🧪 <b>WHBot diagnostics</b>\n\n"
+            "✅ Bot handler: working\n"
+            "📁 DB: <code>{}</code>\n"
+            "📄 Posts: <b>{}</b>\n"
+            "📚 Series: <b>{}</b>\n"
+            "📥 Download channel: <code>{}</code>".format(
+                DB_PATH, posts, series, DOWNLOAD_CHANNEL_ID or "NOT SET"
+            )
+        )
+    except Exception as exc:
+        print("[command] /debug FAILED: {}".format(exc), flush=True)
+        await message.reply_text("❌ DEBUG FAILED: " + html.escape(str(exc)))
+
+
+@app.on_message(filters.all, group=99)
+async def incoming_debug(_, message):
+    # Log only the message type/command, never tokens or full message text.
+    try:
+        text_value = getattr(message, "text", None) or getattr(message, "caption", None) or ""
+        if text_value.startswith("/"):
+            command_name = text_value.split()[0].split("@")[0]
+            print("[incoming] command={} chat_id={}".format(
+                command_name, message.chat.id
+            ), flush=True)
+    except Exception as exc:
+        print("[incoming] log error: {}".format(exc), flush=True)
+
+
 @app.on_message(filters.command("help"))
 async def help_command(_, message):
+    print("[command] /help chat_id={}".format(message.chat.id), flush=True)
     await message.reply_text(
         "<b>WHBot Help</b>\n\n"
         "🔎 <b>Browse</b>\n"
@@ -430,6 +477,7 @@ async def start(_, message):
 
 @app.on_message(filters.command("latest"))
 async def latest(_, message):
+    print("[command] /latest chat_id={}".format(message.chat.id), flush=True)
     status = await message.reply_text("🔎 Loading latest post...")
     try:
         rows = await asyncio.to_thread(
@@ -449,6 +497,7 @@ async def latest(_, message):
 
 @app.on_message(filters.command("search"))
 async def search(_, message):
+    print("[command] /search chat_id={}".format(message.chat.id), flush=True)
     if len(message.command) < 2:
         await message.reply_text("Usage: /search <title>")
         return
@@ -626,6 +675,7 @@ async def crawl_input(_, message):
 
 @app.on_message(filters.command("download"))
 async def download_command(_, message):
+    print("[command] /download chat_id={}".format(message.chat.id), flush=True)
     if not DOWNLOAD_CHANNEL_ID:
         await message.reply_text("❌ DOWNLOAD_CHANNEL_ID is not configured.")
         return
@@ -771,6 +821,7 @@ async def publish_command(_, message):
 
 @app.on_message(filters.command("episode"))
 async def episode(_, message):
+    print("[command] /episode chat_id={}".format(message.chat.id), flush=True)
     if len(message.command) < 2:
         await message.reply_text("Usage: /episode <URL>")
         return
@@ -996,6 +1047,7 @@ async def run_auto(status):
 
 @app.on_message(filters.command("auto"))
 async def auto_command(_, message):
+    print("[command] /auto chat_id={}".format(message.chat.id), flush=True)
     args = message.command[1:]
     if args and args[0].lower() == "stop":
         AUTO_STOP.set()
@@ -1027,6 +1079,7 @@ async def auto_command(_, message):
 
 @app.on_callback_query()
 async def callback(_, query):
+    print("[callback] data={}".format(query.data[:80]), flush=True)
     await query.answer()
 
     try:
