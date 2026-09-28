@@ -25,6 +25,7 @@ API_ID = int(os.getenv("API_ID", "0"))
 API_HASH = os.getenv("API_HASH")
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHANNEL_ID = os.getenv("CHANNEL_ID")
+DOWNLOAD_CHANNEL_ID = os.getenv("DOWNLOAD_CHANNEL_ID")
 
 if not API_ID or not API_HASH or not BOT_TOKEN:
     raise RuntimeError("API_ID, API_HASH and BOT_TOKEN are required")
@@ -40,6 +41,7 @@ CALLBACK_URLS = {}
 AUTO_LOCK = asyncio.Lock()
 AUTO_STOP = threading.Event()
 CRAWL_STATES = {}
+DOWNLOAD_STATES = {}
 
 app = Client(
     "whbot",
@@ -242,6 +244,8 @@ async def download_and_send(
     preferred_quality=None,
     status=None,
     post_id=None,
+    series_name=None,
+    series_total=None,
 ):
     source = choose_source(ep, preferred_quality)
     if not source:
@@ -510,6 +514,116 @@ async def crawl_input(_, message):
         )
     except Exception as exc:
         await status.edit_text("❌ Series crawl failed: " + html.escape(str(exc)))
+
+
+@app.on_message(filters.command("download"))
+async def download_command(_, message):
+    if not DOWNLOAD_CHANNEL_ID:
+        await message.reply_text("❌ DOWNLOAD_CHANNEL_ID is not configured.")
+        return
+
+    if len(message.command) >= 2:
+        await start_series_download(message, " ".join(message.command[1:]).strip())
+        return
+
+    DOWNLOAD_STATES[message.chat.id] = True
+    await message.reply_text(
+        "📥 <b>Series downloader</b>\n\n"
+        "Send the series URL.\n"
+        "Example:\n"
+        "<code>https://watchhentai.net/series/kuro-gal-a-la-carte-id-01/</code>"
+    )
+
+
+async def start_series_download(message, series_url):
+    DOWNLOAD_STATES.pop(message.chat.id, None)
+
+    if not re.match(r"^https?://watchhentai\.net/series/[^\s]+/?$", series_url, re.I):
+        await message.reply_text("❌ Please send a valid WatchHentai series URL.")
+        return
+
+    if AUTO_LOCK.locked():
+        await message.reply_text("⏳ Another download/upload job is already running.")
+        return
+
+    status = await message.reply_text("🔎 Resolving series and episode list...")
+    try:
+        with await AUTO_LOCK.acquire():
+            series = await asyncio.to_thread(provider.get_series, series_url)
+            episode_items = await asyncio.to_thread(
+                provider.series_episodes, series["series_url"]
+            )
+
+            if not episode_items:
+                raise ProviderError("No episodes found in this series.")
+
+            total = series.get("total_episodes") or len(episode_items)
+            await safe_edit(
+                status,
+                "📚 <b>{}</b>\nEpisodes found: <b>{}</b>\nPreparing channel post...".format(
+                    html.escape(series["name"]), total
+                ),
+            )
+
+            await app.send_photo(
+                DOWNLOAD_CHANNEL_ID,
+                series["thumbnail"],
+                caption=(
+                    f"🎬 <b>{html.escape(series['name'])}</b>\n"
+                    f"📚 Total Episodes: <b>{total}</b>\n"
+                    f"🔗 <a href=\"{html.escape(series['series_url'], quote=True)}\">View Series</a>"
+                ),
+            )
+
+            def episode_number(item):
+                m = re.search(r"episode[-\s]+(\d+)", item["page_url"], re.I)
+                return int(m.group(1)) if m else 10**9
+
+            episode_items.sort(key=episode_number)
+
+            for index, item in enumerate(episode_items, 1):
+                ep = await asyncio.to_thread(
+                    provider.get_episode, item["page_url"], True
+                )
+                source = choose_source(ep)
+                if not source:
+                    await safe_edit(
+                        status,
+                        f"⚠️ Skipping episode {index}/{total}: no downloadable source."
+                    )
+                    continue
+
+                await safe_edit(
+                    status,
+                    "⬇️ <b>Episode {}/{}</b> — resolving <b>{}</b>...".format(
+                        index, total, html.escape(source["label"])
+                    ),
+                )
+
+                await download_and_send(
+                    ep,
+                    DOWNLOAD_CHANNEL_ID,
+                    preferred_quality=source["label"],
+                    status=status,
+                    series_name=series["name"],
+                    series_total=total,
+                )
+
+                await safe_edit(
+                    status,
+                    "✅ <b>Episode {}/{}</b> uploaded to download channel.".format(
+                        index, total
+                    ),
+                )
+
+            await safe_edit(
+                status,
+                "🎉 <b>Series download complete</b>\n\n"
+                f"{html.escape(series['name'])}\n"
+                f"Episodes: <b>{total}</b>",
+            )
+    except Exception as exc:
+        await safe_edit(status, "❌ Download failed: " + html.escape(str(exc)))
 
 
 @app.on_message(filters.command("publish"))
