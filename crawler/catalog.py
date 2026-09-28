@@ -39,15 +39,19 @@ def save_episode(con, ep):
      nav.get("next"), ep.get("player_url"), sources.get("720p"),
      sources.get("1080p"), int(time.time())))
 
-def crawl(max_page=121, delay=0.25):
+def crawl(max_page=121, delay=0.25, progress=None):
     provider = WatchHentai()
     con = init_db()
     total = 0
     try:
         for page in range(1, max_page + 1):
             print("[page {}/{}] discovering posts...".format(page, max_page))
+            if progress:
+                progress(page, max_page, 0, total, "discovering")
             items = provider.latest(page)
             print("  found {} episode URLs".format(len(items)))
+            if progress:
+                progress(page, max_page, len(items), total, "processing")
             for item in items:
                 url = item["page_url"]
                 if con.execute("SELECT 1 FROM posts WHERE url=?", (url,)).fetchone():
@@ -58,6 +62,8 @@ def crawl(max_page=121, delay=0.25):
                     con.commit()
                     total += 1
                     print("  + {}".format(ep["title"]))
+                    if progress:
+                        progress(page, max_page, len(items), total, "processing")
                 except Exception as exc:
                     print("  ! {}: {}".format(url, exc))
                 if delay:
@@ -65,6 +71,8 @@ def crawl(max_page=121, delay=0.25):
     finally:
         con.close()
     print("Imported {} new posts into {}".format(total, DB_PATH))
+    if progress:
+        progress(max_page, max_page, 0, total, "completed")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
