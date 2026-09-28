@@ -8,6 +8,7 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 from pyrogram import Client, filters
+from pyrogram.enums import ParseMode
 from pyrogram.errors import RPCError
 from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
@@ -27,6 +28,9 @@ if not API_ID or not API_HASH or not BOT_TOKEN:
 DOWNLOAD_DIR = Path(os.getenv("DOWNLOAD_DIR", "./downloads"))
 DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
+PYROGRAM_WORKDIR = Path(os.getenv("PYROGRAM_WORKDIR", "./.pyrogram"))
+PYROGRAM_WORKDIR.mkdir(parents=True, exist_ok=True)
+
 MAX_UPLOAD_BYTES = 2 * 1024 * 1024 * 1024
 CALLBACK_URLS = {}
 
@@ -35,12 +39,11 @@ app = Client(
     api_id=API_ID,
     api_hash=API_HASH,
     bot_token=BOT_TOKEN,
-    workdir=str(Path(".pyrogram")),
+    workdir=str(PYROGRAM_WORKDIR),
+    parse_mode=ParseMode.HTML,
 )
 provider = WatchHentai()
 
-# Render Web Services require the process to listen on PORT.
-PORT = int(os.getenv("PORT", "10000"))
 CRAWL_INTERVAL = max(int(os.getenv("CRAWL_INTERVAL", "1800")), 60)
 CRAWL_PAGES = max(int(os.getenv("CRAWL_PAGES", "1")), 1)
 PUBLISH_LIMIT = max(int(os.getenv("PUBLISH_LIMIT", "20")), 1)
@@ -120,7 +123,6 @@ async def show(message, ep):
                 message.chat.id,
                 ep["thumbnail"],
                 caption=caption,
-                parse_mode="html",
                 reply_markup=markup,
             )
             return
@@ -130,7 +132,6 @@ async def show(message, ep):
     await app.send_message(
         message.chat.id,
         caption,
-        parse_mode="html",
         reply_markup=markup,
     )
 
@@ -147,8 +148,7 @@ async def help_command(_, message):
         "/stats — catalog statistics\n"
         "/crawl — import pages 1–121\n"
         "/publish — publish pending channel posts\n\n"
-        "⬇️ Open an episode to view available qualities and use the download buttons.",
-        parse_mode="html",
+        "⬇️ Open an episode to view available qualities and use the download buttons."
     )
 
 
@@ -203,8 +203,7 @@ async def search(_, message):
 
     query = " ".join(message.command[1:]).strip()
     status = await message.reply_text(
-        f"🔎 Searching local catalog for <b>{html.escape(query)}</b>...",
-        parse_mode="html",
+        f"🔎 Searching local catalog for <b>{html.escape(query)}</b>..."
     )
     try:
         like = "%" + query.replace("%", "\\%").replace("_", "\\_") + "%"
@@ -240,8 +239,7 @@ async def stats(_, message):
         await message.reply_text(
             f"📊 <b>Catalog</b>\n\n"
             f"Posts: <b>{total or 0}</b>\n"
-            f"Published: <b>{published or 0}</b>",
-            parse_mode="html",
+            f"Published: <b>{published or 0}</b>"
         )
     except Exception as exc:
         await message.reply_text("❌ " + str(exc))
@@ -252,7 +250,8 @@ async def crawl_command(_, message):
     status = await message.reply_text("🕷 Starting catalog import: pages 1-121...")
     try:
         from crawler.catalog import crawl
-        await asyncio.to_thread(crawl, 121, 0.25)
+        with BACKGROUND_LOCK:
+            await asyncio.to_thread(crawl, 121, 0.25)
         await status.edit_text("✅ Catalog import completed.")
     except Exception as exc:
         await status.edit_text("❌ Crawl failed: " + str(exc))
@@ -262,10 +261,10 @@ async def crawl_command(_, message):
 async def publish_command(_, message):
     status = await message.reply_text("📢 Publishing pending catalog posts...")
     try:
-        count = await asyncio.to_thread(publish_pending, 20)
+        with BACKGROUND_LOCK:
+            count = await asyncio.to_thread(publish_pending, 20)
         await status.edit_text(
-            "✅ Published <b>{}</b> pending post(s).".format(count),
-            parse_mode="html",
+            "✅ Published <b>{}</b> pending post(s).".format(count)
         )
     except Exception as exc:
         await status.edit_text("❌ Publish failed: " + str(exc))
@@ -314,7 +313,7 @@ def progress_text(prefix, current, total, started):
 
 async def safe_edit(status, text):
     try:
-        await status.edit_text(text, parse_mode="html")
+        await status.edit_text(text)
     except RPCError:
         pass
 
@@ -390,8 +389,7 @@ async def callback(_, query):
         output = DOWNLOAD_DIR / f"{safe}-{label}.mp4"
 
         status = await query.message.reply_text(
-            f"⬇️ Downloading <b>{html.escape(label)}</b>...",
-            parse_mode="html",
+            f"⬇️ Downloading <b>{html.escape(label)}</b>..."
         )
 
         try:
