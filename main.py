@@ -804,6 +804,16 @@ async def download_series(
     raise_on_error=False,
     acquire_lock=True,
 ):
+
+    if not await validate_download_channel():
+        error = ProviderError(
+            "DOWNLOAD_CHANNEL_ID is invalid or inaccessible. Add the bot to the target channel as an administrator and set the channel's numeric ID (usually -100...) or @username in DOWNLOAD_CHANNEL_ID."
+        )
+        if status is not None:
+            await safe_edit(status, "❌ " + html.escape(str(error)))
+        if raise_on_error:
+            raise error
+        return
     if message is not None:
         DOWNLOAD_STATES.pop(message.chat.id, None)
 
