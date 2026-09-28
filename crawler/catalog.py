@@ -24,25 +24,13 @@ def init_db(db=DB_PATH):
         published INTEGER DEFAULT 0, telegram_message_id INTEGER,
         video_uploaded INTEGER DEFAULT 0, video_message_id INTEGER
     )""")
-
-    columns = {
-        row[1]
-        for row in con.execute("PRAGMA table_info(posts)").fetchall()
-    }
+    columns = {row[1] for row in con.execute("PRAGMA table_info(posts)").fetchall()}
     if "video_uploaded" not in columns:
-        con.execute(
-            "ALTER TABLE posts ADD COLUMN video_uploaded INTEGER DEFAULT 0"
-        )
+        con.execute("ALTER TABLE posts ADD COLUMN video_uploaded INTEGER DEFAULT 0")
     if "video_message_id" not in columns:
-        con.execute(
-            "ALTER TABLE posts ADD COLUMN video_message_id INTEGER"
-        )
-
+        con.execute("ALTER TABLE posts ADD COLUMN video_message_id INTEGER")
     con.execute("CREATE INDEX IF NOT EXISTS idx_posts_url ON posts(url)")
-    con.execute(
-        "CREATE INDEX IF NOT EXISTS idx_posts_series_episode "
-        "ON posts(series_url, episode, id)"
-    )
+    con.execute("CREATE INDEX IF NOT EXISTS idx_posts_series_episode ON posts(series_url, episode, id)")
     con.commit()
     return con
 
@@ -66,15 +54,23 @@ def save_episode(con, ep):
      sources.get("1080p"), int(time.time())))
 
 
-def crawl(max_page=121, delay=0.25):
+def crawl(start_page=0, end_page=None, delay=0.25, on_episode=None):
+    if end_page is None:
+        end_page = start_page
+    if start_page < 0 or end_page < start_page:
+        raise ValueError("Invalid crawl range")
+
     provider = WatchHentai()
     con = init_db()
-    total = 0
+    processed = 0
+    new_ids = []
+
     try:
-        for page in range(1, max_page + 1):
-            print("[page {}/{}] discovering posts...".format(page, max_page), flush=True)
+        for page in range(start_page, end_page + 1):
+            site_page = 1 if page == 0 else page
+            print("[page {}] discovering posts...".format(site_page), flush=True)
             try:
-                items = provider.latest(page)
+                items = provider.latest(site_page)
             except Exception as exc:
                 print("  ! page failed: {}".format(exc), flush=True)
                 continue
@@ -82,14 +78,20 @@ def crawl(max_page=121, delay=0.25):
             print("  found {} episode URLs".format(len(items)), flush=True)
             for item in items:
                 url = item["page_url"]
-                if con.execute("SELECT 1 FROM posts WHERE url=?", (url,)).fetchone():
-                    continue
+                existing = con.execute("SELECT id FROM posts WHERE url=?", (url,)).fetchone()
                 try:
+                    # Resolve every episode completely, including sources,
+                    # thumbnail, synopsis and previous/next/series navigation.
                     ep = provider.get_episode(url, True)
                     save_episode(con, ep)
                     con.commit()
-                    total += 1
+                    row = con.execute("SELECT id FROM posts WHERE url=?", (url,)).fetchone()
+                    if row and not existing:
+                        new_ids.append(row[0])
+                    processed += 1
                     print("  + {}".format(ep["title"]), flush=True)
+                    if on_episode:
+                        on_episode(ep, row[0] if row else None, not bool(existing))
                 except Exception as exc:
                     con.rollback()
                     print("  ! {}: {}".format(url, exc), flush=True)
@@ -97,13 +99,15 @@ def crawl(max_page=121, delay=0.25):
                     time.sleep(delay)
     finally:
         con.close()
-    print("Imported {} new posts into {}".format(total, DB_PATH), flush=True)
-    return total
+
+    print("Processed {} episode(s); {} new".format(processed, len(new_ids)), flush=True)
+    return {"processed": processed, "new_ids": new_ids}
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--pages", type=int, default=121)
+    parser.add_argument("--start", type=int, default=0)
+    parser.add_argument("--end", type=int, default=0)
     parser.add_argument("--delay", type=float, default=0.25)
     args = parser.parse_args()
-    crawl(args.pages, args.delay)
+    crawl(args.start, args.end, args.delay)
