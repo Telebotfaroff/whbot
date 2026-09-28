@@ -12,6 +12,8 @@ from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from providers.watchhentai import WatchHentai, ProviderError
 from crawler.catalog import DB_PATH
+from publisher import publish_pending
+from crawler.catalog import DB_PATH
 
 load_dotenv()
 
@@ -133,7 +135,7 @@ async def start(_, message):
         "/search <query> - search local catalog\n"
         "/episode <URL> - open an episode\n"
         "/stats - catalog statistics\n"
-        "/crawl - import catalog pages 1-121"
+        "/crawl - import catalog pages 1-121\n        "/publish - publish pending catalog posts"
     )
 
 
@@ -228,6 +230,19 @@ async def crawl_command(_, message):
         await status.edit_text("✅ Catalog import completed.")
     except Exception as exc:
         await status.edit_text("❌ Crawl failed: " + str(exc))
+
+
+@app.on_message(filters.command("publish"))
+async def publish_command(_, message):
+    status = await message.reply_text("📢 Publishing pending catalog posts...")
+    try:
+        count = await asyncio.to_thread(publish_pending, 20)
+        await status.edit_text(
+            "✅ Published <b>{}</b> pending post(s).".format(count),
+            parse_mode="html",
+        )
+    except Exception as exc:
+        await status.edit_text("❌ Publish failed: " + str(exc))
 
 
 @app.on_message(filters.command("episode"))
