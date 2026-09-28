@@ -61,6 +61,30 @@ app = Client(
 )
 provider = WatchHentai()
 
+
+async def validate_download_channel():
+    """Resolve the configured Telegram download channel before any upload job."""
+    if not DOWNLOAD_CHANNEL_ID:
+        print("[telegram] DOWNLOAD_CHANNEL_ID is not configured", flush=True)
+        return False
+    try:
+        chat = await app.get_chat(DOWNLOAD_CHANNEL_ID)
+        print(
+            "[telegram] download channel OK: id={} title={}".format(
+                chat.id, getattr(chat, "title", None) or getattr(chat, "username", None) or "unknown"
+            ),
+            flush=True,
+        )
+        return True
+    except Exception as exc:
+        print(
+            "[telegram] DOWNLOAD_CHANNEL_ID INVALID/INACCESSIBLE: {} ({})".format(
+                DOWNLOAD_CHANNEL_ID, exc
+            ),
+            flush=True,
+        )
+        return False
+
 # Background crawling is intentionally OFF by default.
 CRAWL_INTERVAL = max(int(os.getenv("CRAWL_INTERVAL", "1800")), 60)
 CRAWL_PAGES = max(int(os.getenv("CRAWL_PAGES", "1")), 1)
