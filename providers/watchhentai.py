@@ -266,14 +266,16 @@ class WatchHentai:
 
         return output
 
-    def download(self, url, output, progress=None):
+    def download(self, url, output, progress=None, referer=None):
         output = Path(output)
         output.parent.mkdir(parents=True, exist_ok=True)
         started = time.monotonic()
 
+        headers = self._headers(referer or self.base + "/")
+        headers["Accept"] = "video/mp4,video/*;q=0.9,*/*;q=0.8"
         with requests.get(
             url,
-            headers=self._headers(self.base + "/"),
+            headers=headers,
             stream=True,
             timeout=(30, 120),
         ) as response:
