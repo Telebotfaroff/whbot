@@ -5,7 +5,7 @@ import os
 import re
 import time
 from pathlib import Path
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlsplit
 
 import requests
 from PIL import Image
@@ -160,13 +160,26 @@ class WatchHentai:
     def _series_links(self, html):
         seen = set()
         out = []
-        for m in re.finditer(r'href=["\']([^"\']*/series/[^"\']+)["\']', html, re.I):
-            url = self._absolute(m.group(1)).split("#")[0].rstrip("/")
+        for m in re.finditer(r'href=["']([^"']*/series/[^"']+)["']', html, re.I):
+            raw_url = self._absolute(m.group(1)).split("#")[0]
+            parsed = urlsplit(raw_url)
+            path = parsed.path.rstrip("/")
+
+            # Only accept real series detail pages. Listing, pagination, and
+            # filtered archive URLs such as /series/?letter=j must never be
+            # stored as series records.
             if (
-                url.rstrip("/") == self.base + "/series"
-                or re.search(r"/series/page/\d+/?$", url, re.I)
-                or url in seen
+                parsed.netloc.lower() != urlsplit(self.base).netloc.lower()
+                or parsed.query
+                or parsed.fragment
+                or path == "/series"
+                or not re.fullmatch(r"/series/[^/]+", path, re.I)
+                or re.fullmatch(r"/series/page/\\d+", path, re.I)
             ):
+                continue
+
+            url = self._absolute(path)
+            if url in seen:
                 continue
             seen.add(url)
             out.append({"provider": "watchhentai", "series_url": url})
