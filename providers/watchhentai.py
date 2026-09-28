@@ -204,8 +204,14 @@ class WatchHentai:
             "total_episodes": total,
         }
 
-    def series_latest(self, page=0):
-        url = self.base + "/series/" if page == 0 else f"{self.base}/series/page/{page}/"
+    def series_latest(self, page=1):
+        # Series pagination is 1-based:
+        # 1 -> /series/
+        # 2 -> /series/page/2/
+        # 3 -> /series/page/3/
+        if page < 1:
+            raise ProviderError("Series page number must be 1 or greater")
+        url = self.base + "/series/" if page == 1 else f"{self.base}/series/page/{page}/"
         html = self._get(url)
         return self._series_links(html)
 
