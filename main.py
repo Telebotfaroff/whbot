@@ -13,7 +13,6 @@ from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from providers.watchhentai import WatchHentai, ProviderError
 from crawler.catalog import DB_PATH
 from publisher import publish_pending
-from crawler.catalog import DB_PATH
 
 load_dotenv()
 
@@ -83,7 +82,6 @@ def episode_keyboard(ep):
 def episode_text(ep):
     title = html.escape(ep["title"])
     synopsis = html.escape(ep.get("synopsis") or "")
-    # Telegram captions have a finite size; keep the useful description readable.
     if len(synopsis) > 700:
         synopsis = synopsis[:697] + "..."
 
@@ -139,8 +137,10 @@ async def help_command(_, message):
         "/stats — catalog statistics\n"
         "/crawl — import pages 1–121\n"
         "/publish — publish pending channel posts\n\n"
-        "⬇️ Open an episode to view available qualities and use the download buttons."
-    , parse_mode="html")
+        "⬇️ Open an episode to view available qualities and use the download buttons.",
+        parse_mode="html",
+    )
+
 
 @app.on_message(filters.command("start"))
 async def start(_, message):
@@ -150,7 +150,8 @@ async def start(_, message):
         "/search <query> - search local catalog\n"
         "/episode <URL> - open an episode\n"
         "/stats - catalog statistics\n"
-        "/crawl - import catalog pages 1-121\n        "/publish - publish pending catalog posts"
+        "/crawl - import catalog pages 1-121\n"
+        "/publish - publish pending catalog posts"
     )
 
 
@@ -274,6 +275,7 @@ async def episode(_, message):
     except Exception as exc:
         await message.reply_text("❌ " + str(exc))
 
+
 def format_time(seconds):
     seconds = int(max(seconds, 0))
     if seconds < 60:
@@ -332,8 +334,6 @@ def download_progress_factory(status):
 
         text = progress_text("⬇️ Downloading...", current, total, started)
 
-        # Provider runs in a worker thread. Schedule the Telegram edit on
-        # the main asyncio loop.
         asyncio.run_coroutine_threadsafe(
             safe_edit(status, text),
             app.loop,
@@ -404,7 +404,6 @@ async def callback(_, query):
             await status.edit_text("📤 Preparing Telegram upload...")
             started = time.monotonic()
 
-            # Successful return means Telegram accepted the upload.
             await app.send_video(
                 chat_id=query.message.chat.id,
                 video=str(output),
@@ -414,12 +413,10 @@ async def callback(_, query):
                 progress_args=(status, started),
             )
 
-            # Delete ONLY after successful Telegram upload.
             output.unlink(missing_ok=True)
             await status.delete()
 
         except Exception:
-            # Keep the local file if an upload fails so it can be inspected/retried.
             raise
 
     except Exception as exc:
