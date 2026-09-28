@@ -119,7 +119,7 @@ class WatchHentai:
     def _synopsis(self, html):
         # Prefer a real structured description when the page provides one.
         for marker in (
-            "itemprop="description"",
+            'itemprop="description"',
             "itemprop='description'",
         ):
             m = re.search(
