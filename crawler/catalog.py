@@ -36,6 +36,8 @@ def init_db(db=DB_PATH):
 
 
 def save_episode(con, ep):
+    # Crawling stores the real episode page URL. Download/player sources are
+    # resolved only when a user actually requests a download.
     sources = {s["label"]: s["url"] for s in ep.get("sources", [])}
     nav = ep.get("navigation", {})
     con.execute("""INSERT INTO posts
@@ -80,9 +82,10 @@ def crawl(start_page=0, end_page=None, delay=0.25, on_episode=None):
                 url = item["page_url"]
                 existing = con.execute("SELECT id FROM posts WHERE url=?", (url,)).fetchone()
                 try:
-                    # Resolve every episode completely, including sources,
-                    # thumbnail, synopsis and previous/next/series navigation.
-                    ep = provider.get_episode(url, True)
+                    # Crawl metadata only. Keep the actual episode page URL
+                    # in posts.url; resolve direct download sources later when
+                    # a download is explicitly requested.
+                    ep = provider.get_episode(url, False)
                     save_episode(con, ep)
                     con.commit()
                     row = con.execute("SELECT id FROM posts WHERE url=?", (url,)).fetchone()
