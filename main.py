@@ -553,6 +553,48 @@ async def debug_command(_, message):
         await message.reply_text("\n".join(lines))
         return
 
+    # Also inspect the active Pyrogram dialog cache. If the channel is present
+    # here, the session already knows the peer even when direct numeric lookup fails.
+    try:
+        found = []
+        async for dialog in app.get_dialogs():
+            chat = dialog.chat
+            if chat and getattr(chat, "id", None) == int(DOWNLOAD_CHANNEL_ID):
+                found.append(chat)
+                break
+        if found:
+            chat = found[0]
+            lines += [
+                "✅ <b>get_dialogs()</b>: channel found in Pyrogram dialogs",
+                "Dialog ID: <code>{}</code>".format(chat.id),
+                "Dialog title: <b>{}</b>".format(
+                    html.escape(str(getattr(chat, "title", None) or getattr(chat, "username", None) or "unknown"))
+                ),
+            ]
+            print(
+                "[telegram debug] channel found in dialogs: id={} title={}".format(
+                    chat.id,
+                    getattr(chat, "title", None) or getattr(chat, "username", None) or "unknown",
+                ),
+                flush=True,
+            )
+        else:
+            lines += [
+                "⚠️ <b>get_dialogs()</b>: configured channel was NOT found",
+            ]
+            print(
+                "[telegram debug] channel NOT found in dialogs: {}".format(
+                    DOWNLOAD_CHANNEL_ID
+                ),
+                flush=True,
+            )
+    except Exception as exc:
+        lines += [
+            "❌ <b>get_dialogs()</b>: FAILED",
+            "<code>{}</code>".format(html.escape(str(exc))),
+        ]
+        print("[telegram debug] get_dialogs FAILED: {}".format(exc), flush=True)
+
     # Test the two relevant Pyrogram peer-resolution paths separately.
     try:
         chat = await app.get_chat(DOWNLOAD_CHANNEL_ID)
