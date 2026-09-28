@@ -995,3 +995,41 @@ def scheduler_loop():
             print("[scheduler] initial crawl failed: {}".format(exc), flush=True)
 
     while True:
+        try:
+            print("[scheduler] checking first {} page(s)...".format(CRAWL_PAGES), flush=True)
+            with BACKGROUND_LOCK:
+                added = check_once(CRAWL_PAGES)
+                published = publish_pending(PUBLISH_LIMIT)
+            print(
+                "[scheduler] added={}, published={}".format(added, published),
+                flush=True,
+            )
+        except Exception as exc:
+            print("[scheduler] check failed: {}".format(exc), flush=True)
+
+        time.sleep(CRAWL_INTERVAL)
+
+
+def start_background_scheduler():
+    if not SCHEDULER_ENABLED:
+        print("[scheduler] disabled", flush=True)
+        return
+
+    thread = threading.Thread(
+        target=scheduler_loop,
+        name="catalog-scheduler",
+        daemon=True,
+    )
+    thread.start()
+    print(
+        "[scheduler] enabled: every {}s, pages={}, publish_limit={}".format(
+            CRAWL_INTERVAL, CRAWL_PAGES, PUBLISH_LIMIT
+        ),
+        flush=True,
+    )
+
+
+if __name__ == "__main__":
+    print("WHBot starting", flush=True)
+    start_background_scheduler()
+    app.run()
