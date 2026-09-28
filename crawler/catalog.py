@@ -29,6 +29,15 @@ def init_db(db=DB_PATH):
         con.execute("ALTER TABLE posts ADD COLUMN video_uploaded INTEGER DEFAULT 0")
     if "video_message_id" not in columns:
         con.execute("ALTER TABLE posts ADD COLUMN video_message_id INTEGER")
+    con.execute("""CREATE TABLE IF NOT EXISTS series (
+        id INTEGER PRIMARY KEY,
+        url TEXT UNIQUE NOT NULL,
+        name TEXT,
+        thumbnail TEXT,
+        total_episodes INTEGER,
+        scraped_at INTEGER
+    )""")
+    con.execute("CREATE INDEX IF NOT EXISTS idx_series_url ON series(url)")
     con.execute("CREATE INDEX IF NOT EXISTS idx_posts_url ON posts(url)")
     con.execute("CREATE INDEX IF NOT EXISTS idx_posts_series_episode ON posts(series_url, episode, id)")
     con.commit()
@@ -54,6 +63,68 @@ def save_episode(con, ep):
      ep.get("thumbnail"), nav.get("series"), nav.get("previous"),
      nav.get("next"), ep.get("player_url"), sources.get("720p"),
      sources.get("1080p"), int(time.time())))
+
+
+def save_series(con, series):
+    con.execute("""INSERT INTO series
+    (url,name,thumbnail,total_episodes,scraped_at)
+    VALUES (?,?,?,?,?)
+    ON CONFLICT(url) DO UPDATE SET
+    name=excluded.name,
+    thumbnail=excluded.thumbnail,
+    total_episodes=excluded.total_episodes,
+    scraped_at=excluded.scraped_at""",
+    (series["series_url"], series["name"], series.get("thumbnail"),
+     series.get("total_episodes"), int(time.time())))
+
+
+def crawl_series(start_page=0, end_page=None, delay=0.25, on_series=None):
+    if end_page is None:
+        end_page = start_page
+    if start_page < 0 or end_page < start_page:
+        raise ValueError("Invalid crawl range")
+
+    provider = WatchHentai()
+    con = init_db()
+    processed = 0
+    new_ids = []
+
+    try:
+        for page in range(start_page, end_page + 1):
+            print("[series page {}] discovering series...".format(page), flush=True)
+            try:
+                items = provider.series_latest(page)
+            except Exception as exc:
+                print("  ! page failed: {}".format(exc), flush=True)
+                continue
+
+            print("  found {} series URLs".format(len(items)), flush=True)
+            for item in items:
+                url = item["series_url"]
+                existing = con.execute("SELECT id FROM series WHERE url=?", (url,)).fetchone()
+                try:
+                    series = provider.get_series(url)
+                    save_series(con, series)
+                    con.commit()
+                    row = con.execute("SELECT id FROM series WHERE url=?", (url,)).fetchone()
+                    if row and not existing:
+                        new_ids.append(row[0])
+                    processed += 1
+                    print("  + {} ({} episodes)".format(
+                        series["name"], series.get("total_episodes") or 0
+                    ), flush=True)
+                    if on_series:
+                        on_series(series, row[0] if row else None, not bool(existing))
+                except Exception as exc:
+                    con.rollback()
+                    print("  ! {}: {}".format(url, exc), flush=True)
+                if delay:
+                    time.sleep(delay)
+    finally:
+        con.close()
+
+    print("Processed {} series; {} new".format(processed, len(new_ids)), flush=True)
+    return {"processed": processed, "new_ids": new_ids}
 
 
 def crawl(start_page=0, end_page=None, delay=0.25, on_episode=None):
