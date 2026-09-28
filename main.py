@@ -558,22 +558,27 @@ async def download_command(_, message):
     )
 
 
-async def start_series_download(message, series_url, status=None, raise_on_error=False):
+async def start_series_download(message, series_url, status=None, raise_on_error=False, acquire_lock=True):
     if message is not None:
         DOWNLOAD_STATES.pop(message.chat.id, None)
 
     if not re.match(r"^https?://watchhentai\.net/series/[^\s]+/?$", series_url, re.I):
-        await message.reply_text("❌ Please send a valid WatchHentai series URL.")
+        error = ProviderError("Please send a valid WatchHentai series URL.")
+        if message is not None:
+            await message.reply_text("❌ Please send a valid WatchHentai series URL.")
+        if raise_on_error:
+            raise error
         return
 
-    if AUTO_LOCK.locked():
+    if acquire_lock and AUTO_LOCK.locked():
         if message is not None:
             await message.reply_text("⏳ Another download/upload job is already running.")
         return
 
-    owns_lock = not AUTO_LOCK.locked()
-    if owns_lock:
+    owns_lock = False
+    if acquire_lock:
         await AUTO_LOCK.acquire()
+        owns_lock = True
 
     if status is None:
         status = await message.reply_text("🔎 Resolving series and episode list...")
@@ -616,11 +621,9 @@ async def start_series_download(message, series_url, status=None, raise_on_error
                 )
                 source = choose_source(ep)
                 if not source:
-                    await safe_edit(
-                        status,
-                        f"⚠️ Skipping episode {index}/{total}: no downloadable source."
+                    raise ProviderError(
+                        f"Episode {index}/{total} has no downloadable video source."
                     )
-                    continue
 
                 await safe_edit(
                     status,
@@ -844,7 +847,9 @@ async def run_auto(status):
     total = len(rows)
     completed = 0
 
-    for index, row in enumerate(rows, 1):
+    await AUTO_LOCK.acquire()
+    try:
+        for index, row in enumerate(rows, 1):
         if AUTO_STOP.is_set():
             await status.edit_text(
                 f"⏹ <b>Series auto downloader stopped.</b>\n"
@@ -871,6 +876,7 @@ async def run_auto(status):
                 series_url=series_url,
                 status=status,
                 raise_on_error=True,
+                acquire_lock=False,
             )
             completed += 1
 
@@ -889,11 +895,13 @@ async def run_auto(status):
             )
             await asyncio.sleep(1)
 
-    await safe_edit(
-        status,
-        f"🎉 <b>Series auto downloader finished</b>\n"
-        f"Completed: <b>{completed}/{total}</b>"
-    )
+        await safe_edit(
+            status,
+            f"🎉 <b>Series auto downloader finished</b>\n"
+            f"Completed: <b>{completed}/{total}</b>"
+        )
+    finally:
+        AUTO_LOCK.release()
 
 
 @app.on_message(filters.command("auto"))
@@ -998,6 +1006,3 @@ def scheduler_loop():
             with BACKGROUND_LOCK:
                 added = check_once(CRAWL_PAGES)
                 published = publish_pending(PUBLISH_LIMIT)
-            print(
-                "[scheduler] added={}, published={}".format(added, published),
-                flush=True,
