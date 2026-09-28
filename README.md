@@ -1,66 +1,47 @@
 # WHBot
 
-Python Telegram bot built with **Pyrogram** and the WatchHentai provider.
+Python Telegram bot using Pyrogram and the WatchHentai provider.
 
-## Features
+## Local catalog crawler
 
-- `/start` help
-- `/latest` latest episodes
-- `/search <query>` title search
-- `/episode <URL>` direct episode lookup
-- Title, episode, thumbnail and synopsis metadata
-- Previous / next / all-episodes navigation
-- 720p / 1080p source selection when available
-- Direct MP4 downloading without yt-dlp for this provider
-- Download progress
-- Pyrogram Telegram upload progress
-- 2 GiB application-side file-size guard
-- Local video automatically deleted only after successful Telegram upload
-- Failed uploads keep the local file for inspection/retry
+The catalog uses **local SQLite only**. No Supabase, MongoDB or Redis.
 
-## Setup
+Import pages 1 through 121:
 
-Create a Telegram API application and obtain `API_ID` and `API_HASH`. Also create a Telegram bot and obtain `BOT_TOKEN`.
+```bash
+python3 -m crawler.catalog --pages 121
+```
 
-Install:
+Database:
+
+```
+data/watchhentai.db
+```
+
+The importer extracts episode URLs, deduplicates them, fetches metadata and stores the catalog locally. It can be stopped and restarted; already imported URLs are skipped.
+
+Run the incremental checker:
+
+```bash
+python3 -m crawler.scheduler --interval 1800 --pages 1
+```
+
+This checks the newest page every 30 minutes by default and inserts only new posts.
+
+## Bot
 
 ```bash
 python3 -m pip install -r requirements.txt
+python3 main.py
 ```
 
-Create `.env`:
+Environment:
 
 ```env
 API_ID=
 API_HASH=
 BOT_TOKEN=
-
 WATCHHENTAI_BASE_URL=https://watchhentai.net
 DOWNLOAD_DIR=./downloads
+WH_DB_PATH=./data/watchhentai.db
 ```
-
-Run:
-
-```bash
-python3 main.py
-```
-
-## Flow
-
-```
-Telegram
-   ↓
-Search / episode
-   ↓
-WatchHentai metadata + player
-   ↓
-Decode direct MP4 sources
-   ↓
-Stream MP4 to local disk
-   ↓
-Pyrogram uploads video
-   ↓
-Successful upload → delete local file
-```
-
-The WatchHentai provider does not require yt-dlp for its tested direct-MP4 player flow.
