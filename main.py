@@ -1742,3 +1742,6 @@ async def main():
         await idle()
     finally:
         await app.stop()
+
+if __name__ == "__main__":
+    app.run(main)
