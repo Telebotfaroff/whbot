@@ -545,20 +545,26 @@ async def download_command(_, message):
     )
 
 
-async def start_series_download(message, series_url):
-    DOWNLOAD_STATES.pop(message.chat.id, None)
+async def start_series_download(message, series_url, status=None):
+    if message is not None:
+        DOWNLOAD_STATES.pop(message.chat.id, None)
 
     if not re.match(r"^https?://watchhentai\.net/series/[^\s]+/?$", series_url, re.I):
         await message.reply_text("❌ Please send a valid WatchHentai series URL.")
         return
 
     if AUTO_LOCK.locked():
-        await message.reply_text("⏳ Another download/upload job is already running.")
+        if message is not None:
+            await message.reply_text("⏳ Another download/upload job is already running.")
         return
 
-    status = await message.reply_text("🔎 Resolving series and episode list...")
+    owns_lock = not AUTO_LOCK.locked()
+    if owns_lock:
+        await AUTO_LOCK.acquire()
+
+    if status is None:
+        status = await message.reply_text("🔎 Resolving series and episode list...")
     try:
-        async with AUTO_LOCK:
             series = await asyncio.to_thread(provider.get_series, series_url)
             episode_items = await asyncio.to_thread(
                 provider.series_episodes, series["series_url"]
@@ -634,6 +640,9 @@ async def start_series_download(message, series_url):
             )
     except Exception as exc:
         await safe_edit(status, "❌ Download failed: " + html.escape(str(exc)))
+    finally:
+        if owns_lock:
+            AUTO_LOCK.release()
 
 
 @app.on_message(filters.command("publish"))
@@ -784,7 +793,6 @@ async def run_auto(status):
                 message=None,
                 series_url=series_url,
                 status=status,
-                update_status=False,
             )
             completed += 1
 
@@ -833,13 +841,12 @@ async def auto_command(_, message):
 
     status = await message.reply_text("🤖 Starting series auto downloader...")
 
-    async with AUTO_LOCK:
-        try:
-            await run_auto(status)
-        except Exception as exc:
-            await status.edit_text(
-                "❌ Series auto downloader failed: " + html.escape(str(exc))
-            )
+    try:
+        await run_auto(status)
+    except Exception as exc:
+        await status.edit_text(
+            "❌ Series auto downloader failed: " + html.escape(str(exc))
+        )
 
 
 @app.on_callback_query()
