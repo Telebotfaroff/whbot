@@ -1695,13 +1695,12 @@ async def main():
     load_download_channel_setting()
     print("[telegram] configured download channel: {}".format(DOWNLOAD_CHANNEL_ID or "NOT SET"), flush=True)
 
-    # Pyrogram owns the asyncio event loop when app.run(coroutine) is used.
-    # Do not wrap this in asyncio.run(): that creates a second loop and can
-    # leave Pyrogram dispatcher tasks attached to a different loop.
-    await initialize_telegram_peers()
-    start_background_scheduler()
-    await idle()
-
-
-if __name__ == "__main__":
-    app.run(main())
+    # app.run(main) owns the event loop. Start and stop Pyrogram on that
+    # same loop so peer resolution and dispatcher shutdown use one loop.
+    await app.start()
+    try:
+        await initialize_telegram_peers()
+        start_background_scheduler()
+        await idle()
+    finally:
+        await app.stop()
