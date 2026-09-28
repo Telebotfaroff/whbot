@@ -1681,16 +1681,14 @@ async def main():
     print("WHBot starting", flush=True)
     load_download_channel_setting()
     print("[telegram] configured download channel: {}".format(DOWNLOAD_CHANNEL_ID or "NOT SET"), flush=True)
-    await app.start()
-    try:
-        # Resolve the configured upload channel using this exact Pyrogram bot
-        # session before accepting commands or starting background work.
-        await initialize_telegram_peers()
-        start_background_scheduler()
-        await idle()
-    finally:
-        await app.stop()
+
+    # Pyrogram owns the asyncio event loop when app.run(coroutine) is used.
+    # Do not wrap this in asyncio.run(): that creates a second loop and can
+    # leave Pyrogram dispatcher tasks attached to a different loop.
+    await initialize_telegram_peers()
+    start_background_scheduler()
+    await idle()
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    app.run(main())
