@@ -1,5 +1,5 @@
 import asyncio
-import base64
+import hashlib
 import os
 import time
 from pathlib import Path
@@ -35,12 +35,17 @@ app = Client(
 provider = WatchHentai()
 
 
-def enc(value: str) -> str:
-    return base64.urlsafe_b64encode(value.encode()).decode().rstrip("=")
+CALLBACK_URLS = {}
 
+def enc(value: str) -> str:
+    token = hashlib.sha256(value.encode()).hexdigest()[:12]
+    CALLBACK_URLS[token] = value
+    return token
 
 def dec(value: str) -> str:
-    return base64.urlsafe_b64decode(value + "=" * (-len(value) % 4)).decode()
+    if value not in CALLBACK_URLS:
+        raise RuntimeError("This button has expired. Open the episode again.")
+    return CALLBACK_URLS[value]
 
 
 def keyboard(ep):
