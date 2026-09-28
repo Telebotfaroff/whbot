@@ -101,7 +101,7 @@ For the easiest setup, use the **Open in Colab** button above.
 /publish
 ```
 
-## 📢 Telegram publishing
+## 🤖 Sequential video uploader\n\nUse `/auto` to process pending videos one at a time. Episodes are ordered by series and episode number, so one series is completed before the next series starts.\n\n```text\n/auto\n/auto 720p\n/auto stop\n```\n\nThe uploader downloads the selected/highest available quality, prepares the episode thumbnail, reads video duration/dimensions when `ffprobe` is available, uploads the video to the configured Telegram channel, and records the Telegram message ID in SQLite. Already uploaded episodes are skipped.\n\n## 📢 Telegram publishing
 
 The publisher:
 - Spaces channel messages using `TELEGRAM_CHANNEL_INTERVAL`.
