@@ -21,9 +21,28 @@ def init_db(db=DB_PATH):
         episode INTEGER, synopsis TEXT, thumbnail TEXT, series_url TEXT,
         previous_url TEXT, next_url TEXT, player_url TEXT,
         quality_720p TEXT, quality_1080p TEXT, scraped_at INTEGER,
-        published INTEGER DEFAULT 0, telegram_message_id INTEGER
+        published INTEGER DEFAULT 0, telegram_message_id INTEGER,
+        video_uploaded INTEGER DEFAULT 0, video_message_id INTEGER
     )""")
+
+    columns = {
+        row[1]
+        for row in con.execute("PRAGMA table_info(posts)").fetchall()
+    }
+    if "video_uploaded" not in columns:
+        con.execute(
+            "ALTER TABLE posts ADD COLUMN video_uploaded INTEGER DEFAULT 0"
+        )
+    if "video_message_id" not in columns:
+        con.execute(
+            "ALTER TABLE posts ADD COLUMN video_message_id INTEGER"
+        )
+
     con.execute("CREATE INDEX IF NOT EXISTS idx_posts_url ON posts(url)")
+    con.execute(
+        "CREATE INDEX IF NOT EXISTS idx_posts_series_episode "
+        "ON posts(series_url, episode, id)"
+    )
     con.commit()
     return con
 
@@ -54,7 +73,12 @@ def crawl(max_page=121, delay=0.25):
     try:
         for page in range(1, max_page + 1):
             print("[page {}/{}] discovering posts...".format(page, max_page), flush=True)
-            items = provider.latest(page)
+            try:
+                items = provider.latest(page)
+            except Exception as exc:
+                print("  ! page failed: {}".format(exc), flush=True)
+                continue
+
             print("  found {} episode URLs".format(len(items)), flush=True)
             for item in items:
                 url = item["page_url"]
@@ -67,6 +91,7 @@ def crawl(max_page=121, delay=0.25):
                     total += 1
                     print("  + {}".format(ep["title"]), flush=True)
                 except Exception as exc:
+                    con.rollback()
                     print("  ! {}: {}".format(url, exc), flush=True)
                 if delay:
                     time.sleep(delay)
