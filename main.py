@@ -719,21 +719,74 @@ async def download_command(_, message):
     )
 
 
-async def start_series_download(message, series_url, status=None, raise_on_error=False, acquire_lock=True):
+async def resolve_series(series_url):
+    if not re.match(r"^https?://watchhentai\\.net/series/[^\\s]+/?$", series_url, re.I):
+        raise ProviderError("Please send a valid WatchHentai series URL.")
+
+    series = await asyncio.to_thread(provider.get_series, series_url)
+    episode_items = await asyncio.to_thread(
+        provider.series_episodes, series["series_url"]
+    )
+    if not episode_items:
+        raise ProviderError("No episodes found in this series.")
+
+    series["total_episodes"] = series.get("total_episodes") or len(episode_items)
+    return series, episode_items
+
+
+async def show_series_preview(message, series, episode_items):
+    total = series.get("total_episodes") or len(episode_items)
+    caption = (
+        f"🎬 <b>{html.escape(series['name'])}</b>\\n"
+        f"📺 Episodes found: <b>{len(episode_items)}</b>\\n"
+        f"📚 Total Episodes: <b>{total}</b>\\n\\n"
+        "🔗 Episode pages have been collected.\\n"
+        "⬇️ Press the button below to resolve each episode's actual video source and download it."
+    )
+    markup = InlineKeyboardMarkup(
+        [[
+            InlineKeyboardButton(
+                "⬇️ Download All Episodes",
+                callback_data="sd:" + enc(series["series_url"]),
+            )
+        ]]
+    )
+
+    if series.get("thumbnail"):
+        try:
+            await app.send_photo(
+                message.chat.id,
+                series["thumbnail"],
+                caption=caption,
+                reply_markup=markup,
+            )
+            return
+        except Exception as exc:
+            print("[series preview] thumbnail failed: {}".format(exc), flush=True)
+
+    await app.send_message(
+        message.chat.id,
+        caption,
+        reply_markup=markup,
+    )
+
+
+async def download_series(
+    message,
+    series_url,
+    status=None,
+    raise_on_error=False,
+    acquire_lock=True,
+):
     if message is not None:
         DOWNLOAD_STATES.pop(message.chat.id, None)
 
-    if not re.match(r"^https?://watchhentai\.net/series/[^\s]+/?$", series_url, re.I):
-        error = ProviderError("Please send a valid WatchHentai series URL.")
-        if message is not None:
-            await message.reply_text("❌ Please send a valid WatchHentai series URL.")
-        if raise_on_error:
-            raise error
-        return
-
     if acquire_lock and AUTO_LOCK.locked():
+        error = ProviderError("Another download/upload job is already running.")
         if message is not None:
             await message.reply_text("⏳ Another download/upload job is already running.")
+        if raise_on_error:
+            raise error
         return
 
     owns_lock = False
@@ -742,132 +795,131 @@ async def start_series_download(message, series_url, status=None, raise_on_error
         owns_lock = True
 
     if status is None:
+        if message is None:
+            raise ProviderError("A status message is required for background downloads.")
         status = await message.reply_text("🔎 Resolving series and episode list...")
+
     try:
-            series = await asyncio.to_thread(provider.get_series, series_url)
-            episode_items = await asyncio.to_thread(
-                provider.series_episodes, series["series_url"]
-            )
+        series, episode_items = await resolve_series(series_url)
+        total = series.get("total_episodes") or len(episode_items)
 
-            if not episode_items:
-                raise ProviderError("No episodes found in this series.")
+        await safe_edit(
+            status,
+            "📚 <b>{}</b>\\nEpisodes found: <b>{}</b>\\n"
+            "🔗 Resolving video sources only when each episode is downloaded...".format(
+                html.escape(series["name"]), len(episode_items)
+            ),
+        )
 
-            total = series.get("total_episodes") or len(episode_items)
-            await safe_edit(
-                status,
-                "📚 <b>{}</b>\nEpisodes found: <b>{}</b>\nPreparing channel post...".format(
-                    html.escape(series["name"]), total
-                ),
-            )
-
-            header_text = (
-                f"🎬 <b>{html.escape(series['name'])}</b>\n"
-                f"📚 Total Episodes: <b>{total}</b>\n"
-                f'🔗 <a href="{html.escape(series["series_url"], quote=True)}">View Series</a>'
-            )
-            try:
-                if series.get("thumbnail"):
-                    await app.send_photo(
-                        DOWNLOAD_CHANNEL_ID,
-                        series["thumbnail"],
-                        caption=header_text,
-                    )
-                else:
-                    await app.send_message(DOWNLOAD_CHANNEL_ID, header_text)
-            except Exception as exc:
-                print("[series header] {}".format(exc), flush=True)
+        header_text = (
+            f"🎬 <b>{html.escape(series['name'])}</b>\\n"
+            f"📚 Total Episodes: <b>{total}</b>\\n"
+            f'🔗 <a href="{html.escape(series["series_url"], quote=True)}">View Series</a>'
+        )
+        try:
+            if series.get("thumbnail"):
+                await app.send_photo(
+                    DOWNLOAD_CHANNEL_ID,
+                    series["thumbnail"],
+                    caption=header_text,
+                )
+            else:
                 await app.send_message(DOWNLOAD_CHANNEL_ID, header_text)
+        except Exception as exc:
+            print("[series header] {}".format(exc), flush=True)
+            await app.send_message(DOWNLOAD_CHANNEL_ID, header_text)
 
-            def episode_number(item):
-                m = re.search(r"episode[-\s]+(\d+)", item["page_url"], re.I)
-                return int(m.group(1)) if m else 10**9
+        def episode_number(item):
+            m = re.search(r"episode[-\\s]+(\\d+)", item["page_url"], re.I)
+            return int(m.group(1)) if m else 10**9
 
-            episode_items.sort(key=episode_number)
+        episode_items.sort(key=episode_number)
 
-            for index, item in enumerate(episode_items, 1):
+        for index, item in enumerate(episode_items, 1):
+            print(
+                "[series download] episode {}/{} url={}".format(
+                    index, total, item["page_url"]
+                ),
+                flush=True,
+            )
+
+            # The series preview deliberately does not resolve media sources.
+            # Resolve the episode page and its actual stream/download sources here,
+            # immediately before that episode is downloaded.
+            ep = await asyncio.to_thread(
+                provider.get_episode, item["page_url"], True
+            )
+            sources = ep.get("sources") or []
+            if not sources:
+                raise ProviderError(
+                    f"Episode {index}/{total} has no downloadable video source."
+                )
+
+            order = {"2160p": 4, "1440p": 3, "1080p": 2, "720p": 1}
+            sources = sorted(
+                sources,
+                key=lambda source: order.get(
+                    str(source.get("label", "")).lower(), 0
+                ),
+                reverse=True,
+            )
+
+            last_error = None
+            uploaded = False
+            for source in sources:
+                label = str(source.get("label") or "Unknown")
+                await safe_edit(
+                    status,
+                    "⬇️ <b>Episode {}/{}</b> — resolving/downloading <b>{}</b>...".format(
+                        index, total, html.escape(label)
+                    ),
+                )
                 print(
-                    "[series download] episode {}/{} url={}".format(
-                        index, total, item["page_url"]
+                    "[series download] trying episode {} quality={}".format(
+                        index, label
                     ),
                     flush=True,
                 )
-                ep = await asyncio.to_thread(
-                    provider.get_episode, item["page_url"], True
-                )
-                sources = ep.get("sources") or []
-                if not sources:
-                    raise ProviderError(
-                        f"Episode {index}/{total} has no downloadable video source."
+                try:
+                    await download_and_send(
+                        ep,
+                        DOWNLOAD_CHANNEL_ID,
+                        preferred_quality=label,
+                        status=status,
+                        series_name=series["name"],
+                        series_total=total,
                     )
-
-                # Try qualities from highest to lowest. If a CDN/source fails,
-                # the episode gets another available source before the whole
-                # series is stopped.
-                order = {"2160p": 4, "1440p": 3, "1080p": 2, "720p": 1}
-                sources = sorted(
-                    sources,
-                    key=lambda source: order.get(
-                        str(source.get("label", "")).lower(), 0
-                    ),
-                    reverse=True,
-                )
-
-                last_error = None
-                uploaded = False
-                for source in sources:
-                    label = str(source.get("label") or "Unknown")
-                    await safe_edit(
-                        status,
-                        "⬇️ <b>Episode {}/{}</b> — downloading <b>{}</b>...".format(
-                            index, total, html.escape(label)
-                        ),
-                    )
+                    uploaded = True
+                    break
+                except Exception as source_exc:
+                    last_error = source_exc
                     print(
-                        "[series download] trying episode {} quality={}".format(
-                            index, label
+                        "[series download] quality {} failed: {}".format(
+                            label, source_exc
                         ),
                         flush=True,
                     )
-                    try:
-                        await download_and_send(
-                            ep,
-                            DOWNLOAD_CHANNEL_ID,
-                            preferred_quality=label,
-                            status=status,
-                            series_name=series["name"],
-                            series_total=total,
-                        )
-                        uploaded = True
-                        break
-                    except Exception as source_exc:
-                        last_error = source_exc
-                        print(
-                            "[series download] quality {} failed: {}".format(
-                                label, source_exc
-                            ),
-                            flush=True,
-                        )
 
-                if not uploaded:
-                    raise ProviderError(
-                        "Episode {}/{} failed for all available sources: {}".format(
-                            index, total, last_error or "unknown error"
-                        )
+            if not uploaded:
+                raise ProviderError(
+                    "Episode {}/{} failed for all available sources: {}".format(
+                        index, total, last_error or "unknown error"
                     )
-
-                await safe_edit(
-                    status,
-                    "✅ <b>Episode {}/{}</b> uploaded to download channel.".format(
-                        index, total
-                    ),
                 )
 
             await safe_edit(
                 status,
-                "🎉 <b>Series download complete</b>\n\n"
-                f"{html.escape(series['name'])}\n"
-                f"Episodes: <b>{total}</b>",
+                "✅ <b>Episode {}/{}</b> uploaded to download channel.".format(
+                    index, total
+                ),
             )
+
+        await safe_edit(
+            status,
+            "🎉 <b>Series download complete</b>\\n\\n"
+            f"{html.escape(series['name'])}\\n"
+            f"Episodes: <b>{total}</b>",
+        )
     except Exception as exc:
         print(
             "[series download] FAILED: {}: {}".format(type(exc).__name__, exc),
@@ -882,6 +934,25 @@ async def start_series_download(message, series_url, status=None, raise_on_error
     finally:
         if owns_lock:
             AUTO_LOCK.release()
+
+
+async def start_series_download(message, series_url):
+    # /download is a two-step workflow:
+    # 1) scrape the series page and show a preview;
+    # 2) resolve actual media sources only after the user presses Download All.
+    if message is None:
+        raise ProviderError("A message is required for /download preview.")
+
+    DOWNLOAD_STATES.pop(message.chat.id, None)
+    status = await message.reply_text("🔎 Scraping series page and collecting episodes...")
+    try:
+        series, episode_items = await resolve_series(series_url)
+        await status.delete()
+        await show_series_preview(message, series, episode_items)
+    except Exception as exc:
+        await safe_edit(status, "❌ Series lookup failed: " + html.escape(str(exc)))
+
+
 
 
 @app.on_message(filters.command("publish"))
@@ -1090,7 +1161,7 @@ async def run_auto(status):
             )
 
             try:
-                await start_series_download(
+                await download_series(
                     message=None,
                     series_url=series_url,
                     status=status,
@@ -1161,6 +1232,33 @@ async def callback(_, query):
     await query.answer()
 
     try:
+        if query.data.startswith("sd:"):
+            series_url = dec(query.data[3:])
+            if AUTO_LOCK.locked():
+                await query.message.reply_text(
+                    "⏳ Another download/upload job is already running."
+                )
+                return
+
+            status = await query.message.reply_text(
+                "🔎 <b>Starting series download...</b>\\n"
+                "Each episode will be resolved individually."
+            )
+            try:
+                await download_series(
+                    message=None,
+                    series_url=series_url,
+                    status=status,
+                    raise_on_error=False,
+                    acquire_lock=True,
+                )
+            except Exception as exc:
+                await safe_edit(
+                    status,
+                    "❌ Download failed: " + html.escape(str(exc)),
+                )
+            return
+
         if query.data.startswith("ep:"):
             ep = await asyncio.to_thread(
                 provider.get_episode, dec(query.data[3:]), True
