@@ -2,6 +2,7 @@ import asyncio
 import html
 import json
 import os
+import re
 import shutil
 import sqlite3
 import subprocess
@@ -548,7 +549,7 @@ async def start_series_download(message, series_url):
 
     status = await message.reply_text("🔎 Resolving series and episode list...")
     try:
-        with await AUTO_LOCK.acquire():
+        async with AUTO_LOCK:
             series = await asyncio.to_thread(provider.get_series, series_url)
             episode_items = await asyncio.to_thread(
                 provider.series_episodes, series["series_url"]
