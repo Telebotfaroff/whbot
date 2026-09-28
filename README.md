@@ -2,32 +2,35 @@
 
 Python Telegram bot using Pyrogram and the WatchHentai provider.
 
-## Render deployment
+## Railway deployment
 
-The `render-ready` branch is configured as a Render Web Service.
+The railway-ready branch is intended to run as a single persistent Railway service.
 
-Render settings:
+Railway can deploy directly from a GitHub repository and supports custom start commands such as python main.py. See the Railway services documentation.
 
-    Build Command: pip install -r requirements.txt
-    Start Command: python main.py
-    Health Check Path: /health
+Railway settings:
 
-`main.py` starts a small HTTP health server on Render's `PORT` while Pyrogram runs the Telegram bot. The catalog checker and Telegram channel publisher run in the same service as a background thread, so a separate worker service is not required.
+    GitHub repository: Telebotfaroff/whbot
+    Branch: railway-ready
+    Build command: pip install -r requirements.txt
+    Start command: python main.py
 
-### Render environment variables
+No public web server is required. The process is a long-running Telegram bot.
 
-Required:
+## Required variables
 
-    API_ID=
-    API_HASH=
-    BOT_TOKEN=
+Add these in Railway Variables:
+
+    API_ID=your_api_id
+    API_HASH=your_api_hash
+    BOT_TOKEN=your_bot_token
     CHANNEL_ID=@your_channel
 
-Recommended:
+Also add:
 
     WATCHHENTAI_BASE_URL=https://watchhentai.net
-    WH_DB_PATH=./data/watchhentai.db
-    DOWNLOAD_DIR=./downloads
+    WH_DB_PATH=/app/data/watchhentai.db
+    DOWNLOAD_DIR=/app/data/downloads
     TELEGRAM_CHANNEL_INTERVAL=1.2
     SCHEDULER_ENABLED=true
     CRAWL_INTERVAL=1800
@@ -35,45 +38,50 @@ Recommended:
     PUBLISH_LIMIT=20
     INITIAL_CRAWL_PAGES=0
 
-`INITIAL_CRAWL_PAGES=0` avoids a large crawl during every restart. For the first deployment, set it to `121` if you want the full catalog imported in the background, then change it back to `0` after the initial import.
+## Persistent volume
 
-The normal background checker scans the newest page every 30 minutes and publishes newly discovered catalog entries.
+Railway's normal service filesystem is ephemeral. Data that must survive deployments should be stored on a Railway Volume. Railway documents that application paths are under /app, so mount the volume at /app/data.
 
-## Persistent SQLite storage on Render
+Create a Railway Volume and set its Mount Path to:
 
-Render's normal service filesystem is ephemeral. If the catalog must survive redeploys/restarts, attach a Render Persistent Disk and set:
+    /app/data
 
-    WH_DB_PATH=/data/watchhentai.db
-    DOWNLOAD_DIR=/data/downloads
+Then use:
 
-The free Render instance does not provide persistent-disk storage, so a free deployment can lose its local SQLite catalog when the service is replaced.
+    WH_DB_PATH=/app/data/watchhentai.db
+    DOWNLOAD_DIR=/app/data/downloads
 
-The bot does not require a public website; `/health` only exists to satisfy Render's Web Service health requirement.
+The SQLite catalog and downloaded files will then use the persistent volume.
 
-## Local catalog crawler
+Railway currently lists 0.5 GB volumes for Free/Trial plans and 5 GB for Hobby.
 
-The catalog uses local SQLite only. No Supabase, MongoDB or Redis.
+## First deployment
 
-Import pages 1 through 121:
+For the first deployment, leave:
 
-    python3 -m crawler.catalog --pages 121
+    INITIAL_CRAWL_PAGES=0
 
-Database:
+Deploy the bot first and verify that it starts.
 
-    data/watchhentai.db
+If you want the full historical catalog imported automatically, temporarily set:
 
-The importer extracts episode URLs, deduplicates them, fetches metadata and stores the catalog locally. It can be stopped and restarted; already imported URLs are skipped.
+    INITIAL_CRAWL_PAGES=121
 
-Run the incremental checker manually:
+After the initial import finishes, change it back to:
 
-    python3 -m crawler.scheduler --interval 1800 --pages 1
+    INITIAL_CRAWL_PAGES=0
 
-## Bot
+The normal scheduler checks the newest page every 30 minutes and publishes newly discovered entries.
 
-    python3 -m pip install -r requirements.txt
-    python3 main.py
+## Telegram publishing
 
-Commands:
+The publisher spaces channel sends by at least 1.2 seconds and handles Telegram HTTP 429 retry_after responses.
+
+It stores the Telegram message ID in SQLite and marks successful posts as published, preventing normal duplicate publishing.
+
+The publisher posts catalog metadata, thumbnail and source page link. It does not automatically upload source video files to the channel.
+
+## Bot commands
 
     /start
     /help
@@ -84,17 +92,12 @@ Commands:
     /crawl
     /publish
 
-## Telegram channel publishing
+## Local development
 
-Set:
+    python3 -m pip install -r requirements.txt
+    python3 main.py
 
-    CHANNEL_ID=@your_channel
-    TELEGRAM_CHANNEL_INTERVAL=1.2
+Local paths can be overridden with:
 
-The scheduler automatically publishes unpublished catalog entries. It stores the Telegram message ID in SQLite so published posts are not sent again.
-
-Manual publishing:
-
-    /publish
-
-The publisher spaces channel sends by at least 1.2 seconds and handles Telegram HTTP 429 `retry_after` responses before retrying. It posts catalog metadata/thumbnail and the source page link; it does not automatically upload source video files to the channel.
+    WH_DB_PATH=./data/watchhentai.db
+    DOWNLOAD_DIR=./downloads
