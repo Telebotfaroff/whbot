@@ -78,23 +78,31 @@ class WatchHentai:
     def _sources(self, html):
         m = re.search(r"var\s+whJwSources\s*=\s*(\[[\s\S]*?\]);", html)
         if not m:
+            print("[resolver] whJwSources not found", flush=True)
             return []
 
         try:
             data = json.loads(m.group(1))
-        except json.JSONDecodeError:
+        except json.JSONDecodeError as exc:
+            print("[resolver] whJwSources JSON error: {}".format(exc), flush=True)
             return []
 
+        print("[resolver] whJwSources entries: {}".format(len(data)), flush=True)
         out = []
-        for source in data:
+        for index, source in enumerate(data, 1):
             try:
+                label = source.get("label", "Unknown")
+                decoded_url = self._decode(source["file"])
+                print("[resolver] source #{} label={} type={} url={}".format(
+                    index, label, source.get("type", "video/mp4"), decoded_url[:180]
+                ), flush=True)
                 out.append({
-                    "label": source.get("label", "Unknown"),
+                    "label": label,
                     "type": source.get("type", "video/mp4"),
-                    "url": self._decode(source["file"]),
+                    "url": decoded_url,
                 })
-            except Exception:
-                continue
+            except Exception as exc:
+                print("[resolver] source #{} decode failed: {}".format(index, exc), flush=True)
         return out
 
     def _navigation(self, html):
@@ -250,6 +258,7 @@ class WatchHentai:
             return 0
 
     def get_episode(self, page_url, resolve_sources=True):
+        print("[resolver] get_episode: {}".format(page_url), flush=True)
         if not re.search(r"watchhentai\.net/videos/", page_url, re.I):
             raise ProviderError("Not a WatchHentai episode URL")
 
@@ -268,7 +277,11 @@ class WatchHentai:
             raise ProviderError("Primary player URL not found")
 
         player = self._absolute(m.group(1))
-        sources = self._sources(self._get(player, page_url)) if resolve_sources else []
+        print("[resolver] player URL: {}".format(player), flush=True)
+        player_html = self._get(player, page_url)
+        print("[resolver] player HTML bytes: {}".format(len(player_html.encode("utf-8", "ignore"))), flush=True)
+        sources = self._sources(player_html) if resolve_sources else []
+        print("[resolver] resolved sources: {}".format(len(sources)), flush=True)
 
         em = re.search(r"episode[-\s]+(\d+)", title + " " + page_url, re.I)
         navigation = self._navigation(html)
@@ -344,6 +357,10 @@ class WatchHentai:
         output = Path(output)
         output.parent.mkdir(parents=True, exist_ok=True)
         started = time.monotonic()
+        print("[downloader] START", flush=True)
+        print("[downloader] URL: {}".format(url[:300]), flush=True)
+        print("[downloader] output: {}".format(output), flush=True)
+        print("[downloader] referer: {}".format(referer or self.base + "/"), flush=True)
 
         headers = self._headers(referer or self.base + "/")
         headers["Accept"] = (
@@ -352,6 +369,7 @@ class WatchHentai:
 
         for attempt in range(1, 4):
             try:
+                print("[downloader] attempt {}/3".format(attempt), flush=True)
                 with requests.get(
                     url,
                     headers=headers,
@@ -360,6 +378,10 @@ class WatchHentai:
                     allow_redirects=True,
                 ) as response:
                     code = response.status_code
+                    print("[downloader] HTTP status: {}".format(code), flush=True)
+                    print("[downloader] final URL: {}".format(response.url), flush=True)
+                    print("[downloader] content-type: {}".format(response.headers.get("content-type", "unknown")), flush=True)
+                    print("[downloader] content-length: {}".format(response.headers.get("content-length", "unknown")), flush=True)
 
                     if code in {403, 408, 425, 429} or code >= 500:
                         if attempt < 3:
@@ -423,13 +445,17 @@ class WatchHentai:
                     if current <= 0:
                         raise ProviderError("Media response was empty")
 
+                    print("[downloader] SUCCESS bytes={}".format(current), flush=True)
+                    print("[downloader] file={}".format(output), flush=True)
                     return
 
             except requests.RequestException as exc:
+                print("[downloader] request error attempt {}: {}".format(attempt, exc), flush=True)
                 output.unlink(missing_ok=True)
                 if attempt < 3:
                     time.sleep(float(attempt * 2))
                     continue
                 raise ProviderError("Media request failed: {}".format(exc)) from exc
 
+        print("[downloader] FAILED after all attempts", flush=True)
         raise ProviderError("Media download failed")
