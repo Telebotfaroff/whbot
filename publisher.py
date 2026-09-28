@@ -11,7 +11,7 @@ from crawler.catalog import DB_PATH
 
 load_dotenv()
 
-MIN_INTERVAL = float(os.getenv("TELEGRAM_CHANNEL_INTERVAL", "1.2"))
+MIN_INTERVAL = float(os.getenv("TELEGRAM_CHANNEL_INTERVAL", "2.0"))
 
 
 class TelegramPublisher:
