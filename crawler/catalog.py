@@ -148,7 +148,7 @@ def crawl_series(start_page=1, end_page=None, delay=0.25, on_series=None, on_pro
 
                     # Keep the series record as the fast catalog, but also
                     # index its episode pages into posts. This makes /latest,
-/search and /stats useful after a /crawl without resolving video sources.
+                    # /search and /stats useful after a /crawl without resolving video sources.
                     series["episode_urls"] = episode_urls
                     series["total_episodes"] = (
                         series.get("total_episodes") or len(episode_urls)
