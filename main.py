@@ -284,9 +284,22 @@ async def download_and_send(
     series_name=None,
     series_total=None,
 ):
+    print("[download] title={} preferred={} sources={}".format(
+        ep.get("title"), preferred_quality, len(ep.get("sources") or [])
+    ), flush=True)
+    for item in (ep.get("sources") or []):
+        print("[download] available label={} type={} url={}".format(
+            item.get("label"), item.get("type"), str(item.get("url", ""))[:180]
+        ), flush=True)
+
     source = choose_source(ep, preferred_quality)
     if not source:
+        print("[download] ERROR: no source selected", flush=True)
         raise ProviderError("No downloadable video source is available")
+
+    print("[download] selected label={} url={}".format(
+        source.get("label"), str(source.get("url", ""))[:300]
+    ), flush=True)
 
     safe = "".join(
         char if char.isalnum() or char in "._-" else "_"
@@ -312,6 +325,7 @@ async def download_and_send(
         )
 
         size = output.stat().st_size
+        print("[download] completed local file size={}".format(size), flush=True)
         if size > MAX_UPLOAD_BYTES:
             raise ProviderError(
                 "File is {:.2f} GB, above the 2 GB Pyrogram limit.".format(
@@ -320,6 +334,9 @@ async def download_and_send(
             )
 
         metadata = await asyncio.to_thread(video_metadata, output)
+        print("[upload] ffprobe duration={} width={} height={}".format(
+            metadata.get("duration"), metadata.get("width"), metadata.get("height")
+        ), flush=True)
 
         if status:
             await status.edit_text("🖼 Preparing thumbnail and Telegram metadata...")
@@ -347,6 +364,7 @@ async def download_and_send(
             await status.edit_text("📤 Uploading video to Telegram...")
 
         started = time.monotonic()
+        print("[upload] sending {} to chat {}".format(output.name, target_chat), flush=True)
         sent = await app.send_video(
             chat_id=target_chat,
             video=str(output),
@@ -361,10 +379,14 @@ async def download_and_send(
             progress_args=(status, started),
         )
 
+        print("[upload] Telegram message id={}".format(sent.id), flush=True)
         if post_id is not None:
             mark_video_uploaded(post_id, sent.id)
 
         return sent
+    except Exception as exc:
+        print("[download/upload] FAILED: {}".format(exc), flush=True)
+        raise
     finally:
         output.unlink(missing_ok=True)
         thumb.unlink(missing_ok=True)
