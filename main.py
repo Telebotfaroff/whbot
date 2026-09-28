@@ -207,7 +207,7 @@ async def search(_, message):
         parse_mode="html",
     )
     try:
-        like = "%" + query.replace("%", "\%").replace("_", "\_") + "%"
+        like = "%" + query.replace("%", "\\%").replace("_", "\\_") + "%"
         rows = await asyncio.to_thread(
             db_rows,
             "SELECT url FROM posts WHERE title LIKE ? ESCAPE '\\' "
