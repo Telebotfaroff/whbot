@@ -706,8 +706,10 @@ async def download_command(_, message):
         await message.reply_text("❌ DOWNLOAD_CHANNEL_ID is not configured.")
         return
 
-    if len(message.command) >= 2:
-        await start_series_download(message, " ".join(message.command[1:]).strip())
+    raw_text = getattr(message, "text", None) or getattr(message, "caption", None) or ""
+    parts = raw_text.strip().split(None, 1)
+    if len(parts) == 2 and parts[1].strip():
+        await start_series_download(message, parts[1].strip())
         return
 
     DOWNLOAD_STATES[message.chat.id] = True
