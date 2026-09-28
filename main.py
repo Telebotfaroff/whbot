@@ -803,17 +803,29 @@ async def download_series(
     status=None,
     raise_on_error=False,
     acquire_lock=True,
+    fallback_chat_id=None,
 ):
 
-    if not await validate_download_channel():
-        error = ProviderError(
-            "DOWNLOAD_CHANNEL_ID is invalid or inaccessible. Add the bot to the target channel as an administrator and set the channel's numeric ID (usually -100...) or @username in DOWNLOAD_CHANNEL_ID."
-        )
-        if status is not None:
-            await safe_edit(status, "❌ " + html.escape(str(error)))
-        if raise_on_error:
-            raise error
-        return
+    upload_chat = DOWNLOAD_CHANNEL_ID
+    channel_ok = await validate_download_channel()
+    if not channel_ok:
+        if fallback_chat_id is not None:
+            upload_chat = fallback_chat_id
+            print("[telegram] using user-chat fallback: {}".format(upload_chat), flush=True)
+            if status is not None:
+                await safe_edit(
+                    status,
+                    "⚠️ Download channel unavailable. Videos will be sent to your chat instead.",
+                )
+        else:
+            error = ProviderError(
+                "DOWNLOAD_CHANNEL_ID is invalid or inaccessible. Add the bot to the target channel as an administrator and set the channel's numeric ID (usually -100...) or @username in DOWNLOAD_CHANNEL_ID."
+            )
+            if status is not None:
+                await safe_edit(status, "❌ " + html.escape(str(error)))
+            if raise_on_error:
+                raise error
+            return
     if message is not None:
         DOWNLOAD_STATES.pop(message.chat.id, None)
 
@@ -855,12 +867,12 @@ async def download_series(
         try:
             if series.get("thumbnail"):
                 await app.send_photo(
-                    DOWNLOAD_CHANNEL_ID,
+                    upload_chat,
                     series["thumbnail"],
                     caption=header_text,
                 )
             else:
-                await app.send_message(DOWNLOAD_CHANNEL_ID, header_text)
+                await app.send_message(upload_chat, header_text)
         except Exception as exc:
             # A header failure should not hide the actual episode download error.
             print("[series header] {}".format(exc), flush=True)
@@ -919,7 +931,7 @@ async def download_series(
                 try:
                     await download_and_send(
                         ep,
-                        DOWNLOAD_CHANNEL_ID,
+                        upload_chat,
                         preferred_quality=label,
                         status=status,
                         series_name=series["name"],
@@ -1287,6 +1299,7 @@ async def callback(_, query):
                     status=status,
                     raise_on_error=False,
                     acquire_lock=True,
+                    fallback_chat_id=query.message.chat.id,
                 )
             except Exception as exc:
                 await safe_edit(
