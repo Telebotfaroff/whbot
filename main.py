@@ -456,16 +456,16 @@ def series_crawl_progress_factory(status):
         name = series.get("name") if series else None
         episodes = series.get("total_episodes") if series else None
         current = (
-            f"🎬 Current: <b>{html.escape(name)}</b>\\n"
-            f"📺 Episodes: <b>{episodes or 0}</b>\\n"
+            f"🎬 Current: <b>{html.escape(name)}</b>\n"
+            f"📺 Episodes: <b>{episodes or 0}</b>\n"
             if name else ""
         )
         text = (
-            "🕷️ <b>Series crawler running</b>\\n\\n"
-            f"📄 Page: <b>{page}/{total_pages}</b>\\n"
-            f"📚 Series processed: <b>{processed}</b>\\n"
-            f"🆕 New series: <b>{new_count}</b>\\n"
-            + current + "\\n"
+            "🕷️ <b>Series crawler running</b>\n\n"
+            f"📄 Page: <b>{page}/{total_pages}</b>\n"
+            f"📚 Series processed: <b>{processed}</b>\n"
+            f"🆕 New series: <b>{new_count}</b>\n"
+            + current + "\n"
             "🔄 Updating every 5 seconds"
         )
         asyncio.run_coroutine_threadsafe(safe_edit(status, text), app.loop)
