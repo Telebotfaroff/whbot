@@ -699,7 +699,7 @@ async def crawl_input(_, message):
         await status.edit_text("❌ Series crawl failed: " + html.escape(str(exc)))
 
 
-@app.on_message(filters.command("download"))
+@app.on_message(filters.regex(r"^/download(?:@\\w+)?(?:\\s+.*)?$", flags=re.I))
 async def download_command(_, message):
     print("[command] /download chat_id={}".format(message.chat.id), flush=True)
     if not DOWNLOAD_CHANNEL_ID:
