@@ -3,6 +3,8 @@ import html
 import os
 import time
 import sqlite3
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -37,6 +39,15 @@ app = Client(
     workdir=str(Path(".pyrogram")),
 )
 provider = WatchHentai()
+
+# Render Web Services require the process to listen on PORT.
+PORT = int(os.getenv("PORT", "10000"))
+CRAWL_INTERVAL = max(int(os.getenv("CRAWL_INTERVAL", "1800")), 60)
+CRAWL_PAGES = max(int(os.getenv("CRAWL_PAGES", "1")), 1)
+PUBLISH_LIMIT = max(int(os.getenv("PUBLISH_LIMIT", "20")), 1)
+INITIAL_CRAWL_PAGES = max(int(os.getenv("INITIAL_CRAWL_PAGES", "0")), 0)
+SCHEDULER_ENABLED = os.getenv("SCHEDULER_ENABLED", "true").lower() not in {"0", "false", "no", "off"}
+BACKGROUND_LOCK = threading.Lock()
 
 
 def enc(value):
@@ -423,6 +434,80 @@ async def callback(_, query):
         await query.message.reply_text("❌ " + str(exc))
 
 
+class HealthHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path not in ("/", "/health", "/healthz"):
+            self.send_response(404)
+            self.end_headers()
+            return
+        body = b"WHBot OK"
+        self.send_response(200)
+        self.send_header("Content-Type", "text/plain; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, format, *args):
+        return
+
+
+def start_health_server():
+    server = ThreadingHTTPServer(("0.0.0.0", PORT), HealthHandler)
+    thread = threading.Thread(target=server.serve_forever, name="render-health", daemon=True)
+    thread.start()
+    print("[render] health server listening on port {}".format(PORT), flush=True)
+    return server
+
+
+def scheduler_loop():
+    from crawler.scheduler import check_once
+
+    if INITIAL_CRAWL_PAGES:
+        try:
+            print("[scheduler] initial crawl: {} page(s)".format(INITIAL_CRAWL_PAGES), flush=True)
+            with BACKGROUND_LOCK:
+                from crawler.catalog import crawl
+                crawl(INITIAL_CRAWL_PAGES, 0.25)
+        except Exception as exc:
+            print("[scheduler] initial crawl failed: {}".format(exc), flush=True)
+
+    while True:
+        try:
+            print("[scheduler] checking first {} page(s)...".format(CRAWL_PAGES), flush=True)
+            with BACKGROUND_LOCK:
+                added = check_once(CRAWL_PAGES)
+                published = publish_pending(PUBLISH_LIMIT)
+            print(
+                "[scheduler] added={}, published={}".format(added, published),
+                flush=True,
+            )
+        except Exception as exc:
+            print("[scheduler] check failed: {}".format(exc), flush=True)
+
+        time.sleep(CRAWL_INTERVAL)
+
+
+def start_background_scheduler():
+    if not SCHEDULER_ENABLED:
+        print("[scheduler] disabled", flush=True)
+        return
+
+    thread = threading.Thread(
+        target=scheduler_loop,
+        name="catalog-scheduler",
+        daemon=True,
+    )
+    thread.start()
+    print(
+        "[scheduler] enabled: every {}s, pages={}, publish_limit={}".format(
+            CRAWL_INTERVAL, CRAWL_PAGES, PUBLISH_LIMIT
+        ),
+        flush=True,
+    )
+
+
 if __name__ == "__main__":
-    print("WHBot running with Pyrogram")
+    print("WHBot starting", flush=True)
+    start_health_server()
+    start_background_scheduler()
     app.run()
