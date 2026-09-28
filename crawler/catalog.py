@@ -103,7 +103,7 @@ def save_series(con, series, episode_urls=None):
      int(time.time())))
 
 
-def crawl_series(start_page=1, end_page=None, delay=0.25, on_series=None):
+def crawl_series(start_page=1, end_page=None, delay=0.25, on_series=None, on_progress=None):
     """
     Crawl inclusive series listing pages.
 
