@@ -244,7 +244,7 @@ async def crawl_command(_, message):
     status = await message.reply_text("🕷 Starting catalog import: pages 1-121...")
     try:
         from crawler.catalog import crawl
-        await asyncio.to_thread(crawl, 121, 0.25)
+        await asyncio.to_thread(crawl, 121, 0.25, crawl_progress_factory(status))
         await status.edit_text("✅ Catalog import completed.")
     except Exception as exc:
         await status.edit_text("❌ Crawl failed: " + str(exc))
@@ -328,6 +328,42 @@ def progress_text(prefix, current, total, started):
         f"⏱ <b>{format_time(elapsed)}</b> elapsed  •  "
         f"🕐 <b>{format_time(eta)}</b> left"
     )
+
+
+def crawl_progress_factory(status):
+    state = {"last": 0.0}
+
+    def progress(page, total_pages, found, imported, phase):
+        now = time.monotonic()
+        if phase != "completed" and now - state["last"] < 2.0:
+            return
+        state["last"] = now
+
+        percent = page * 100 / total_pages if total_pages else 0
+        bar = progress_bar(percent)
+
+        if phase == "completed":
+            text = (
+                "🕷️ <b>Crawl completed</b>\n"
+                f"<code>[{bar}] 100.0%</code>\n"
+                f"📄 Pages: <b>{total_pages}/{total_pages}</b>\n"
+                f"🆕 New posts: <b>{imported}</b>"
+            )
+        else:
+            text = (
+                "🕷️ <b>Crawling catalog</b>\n"
+                f"<code>[{bar}] {percent:5.1f}%</code>\n"
+                f"📄 Page: <b>{page}/{total_pages}</b>\n"
+                f"🔎 Found: <b>{found}</b> episodes\n"
+                f"🆕 Imported: <b>{imported}</b>"
+            )
+
+        asyncio.run_coroutine_threadsafe(
+            safe_edit(status, text),
+            app.loop,
+        )
+
+    return progress
 
 
 async def safe_edit(status, text):
