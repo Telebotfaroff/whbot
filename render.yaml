@@ -1,0 +1,36 @@
+services:
+  - type: web
+    name: whbot
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: python main.py
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: API_ID
+        sync: false
+      - key: API_HASH
+        sync: false
+      - key: BOT_TOKEN
+        sync: false
+      - key: CHANNEL_ID
+        sync: false
+      - key: WATCHHENTAI_BASE_URL
+        value: https://watchhentai.net
+      - key: WH_DB_PATH
+        value: ./data/watchhentai.db
+      - key: DOWNLOAD_DIR
+        value: ./downloads
+      - key: TELEGRAM_CHANNEL_INTERVAL
+        value: "1.2"
+      - key: SCHEDULER_ENABLED
+        value: "true"
+      - key: CRAWL_INTERVAL
+        value: "1800"
+      - key: CRAWL_PAGES
+        value: "1"
+      - key: PUBLISH_LIMIT
+        value: "20"
+      - key: INITIAL_CRAWL_PAGES
+        value: "0"
