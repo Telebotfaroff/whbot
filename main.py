@@ -628,12 +628,12 @@ async def start_series_download(message, series_url, status=None, raise_on_error
                 ),
             )
 
+            header_text = (
+                f"🎬 <b>{html.escape(series['name'])}</b>\n"
+                f"📚 Total Episodes: <b>{total}</b>\n"
+                f'🔗 <a href="{html.escape(series["series_url"], quote=True)}">View Series</a>'
+            )
             try:
-                header_text = (
-                    f"🎬 <b>{html.escape(series['name'])}</b>\n"
-                    f"📚 Total Episodes: <b>{total}</b>\n"
-                    f"🔗 <a href="{html.escape(series['series_url'], quote=True)}">View Series</a>"
-                )
                 if series.get("thumbnail"):
                     await app.send_photo(
                         DOWNLOAD_CHANNEL_ID,
@@ -644,12 +644,7 @@ async def start_series_download(message, series_url, status=None, raise_on_error
                     await app.send_message(DOWNLOAD_CHANNEL_ID, header_text)
             except Exception as exc:
                 print("[series header] {}".format(exc), flush=True)
-                await app.send_message(
-                    DOWNLOAD_CHANNEL_ID,
-                    header_text,
-                )
-
-            )
+                await app.send_message(DOWNLOAD_CHANNEL_ID, header_text)
 
             def episode_number(item):
                 m = re.search(r"episode[-\s]+(\d+)", item["page_url"], re.I)
