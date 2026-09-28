@@ -57,60 +57,111 @@ class TelegramPublisher:
 
     def publish_row(self, row):
         _, url, title, episode, synopsis, thumbnail, series_url, *_rest = row
-        q720 = row[10]
-        q1080 = row[11]
+        total_episodes = 0
 
-        lines = ["🎬 <b>{}</b>".format(html.escape(title or "Untitled"))]
+        if series_url:
+            with sqlite3.connect(DB_PATH, timeout=30) as count_con:
+                total_episodes = count_con.execute(
+                    "SELECT COUNT(*) FROM posts WHERE series_url=?",
+                    (series_url,),
+                ).fetchone()[0]
+
+        lines = [
+            "🎬 <b>{}</b>".format(html.escape(title or "Untitled")),
+        ]
         if episode is not None:
             lines.append("📺 Episode: <b>{}</b>".format(episode))
-
-        if synopsis:
-            text = synopsis.strip()
-            if len(text) > 700:
-                text = text[:697] + "..."
-            lines += ["", "📝 <b>Synopsis</b>", html.escape(text)]
-
-        qualities = [
-            q for q, value in (("1080p", q1080), ("720p", q720)) if value
-        ]
-        if qualities:
-            lines += ["", "🎥 <b>Quality:</b> " + ", ".join(qualities)]
-
-        lines += [
-            "",
-            '🔗 <a href="{}">Open post</a>'.format(
-                html.escape(url, quote=True)
-            ),
-        ]
+        if total_episodes:
+            lines.append("📚 Total Episodes: <b>{}</b>".format(total_episodes))
 
         if series_url:
             lines.append(
-                '📋 <a href="{}">All episodes</a>'.format(
+                '📋 <a href="{}">All Episodes</a>'.format(
                     html.escape(series_url, quote=True)
                 )
             )
+
+        lines.append(
+            '🔗 <a href="{}">View Episode</a>'.format(
+                html.escape(url, quote=True)
+            )
+        )
 
         caption = "\n".join(lines)
 
         if thumbnail:
             try:
-                result = self._call("sendPhoto", {
-                    "chat_id": self.channel_id,
-                    "photo": thumbnail,
-                    "caption": caption,
-                    "parse_mode": "HTML",
-                })
+                result = self._call(
+                    "sendPhoto",
+                    {
+                        "chat_id": self.channel_id,
+                        "photo": thumbnail,
+                        "caption": caption,
+                        "parse_mode": "HTML",
+                    },
+                )
                 return int(result["message_id"])
             except Exception as exc:
-                print("[telegram] thumbnail failed: {}".format(exc), flush=True)
+                print(
+                    "[telegram] thumbnail failed: {}".format(exc),
+                    flush=True,
+                )
 
-        result = self._call("sendMessage", {
-            "chat_id": self.channel_id,
-            "text": caption,
-            "parse_mode": "HTML",
-            "disable_web_page_preview": False,
-        })
+        result = self._call(
+            "sendMessage",
+            {
+                "chat_id": self.channel_id,
+                "text": caption,
+                "parse_mode": "HTML",
+                "disable_web_page_preview": False,
+            },
+        )
         return int(result["message_id"])
+
+
+def _mark_published(con, post_id, message_id):
+    con.execute(
+        "UPDATE posts SET published=1, telegram_message_id=? WHERE id=?",
+        (message_id, post_id),
+    )
+    con.commit()
+
+
+def publish_ids(post_ids):
+    publisher = TelegramPublisher()
+    con = sqlite3.connect(DB_PATH, timeout=30)
+    count = 0
+
+    try:
+        for post_id in post_ids:
+            row = con.execute(
+                """SELECT id,url,title,episode,synopsis,thumbnail,series_url,
+                previous_url,next_url,player_url,quality_720p,quality_1080p,
+                scraped_at,published,telegram_message_id
+                FROM posts WHERE id=?""",
+                (post_id,),
+            ).fetchone()
+
+            if not row or row[13]:
+                continue
+
+            try:
+                message_id = publisher.publish_row(row)
+                _mark_published(con, post_id, message_id)
+                count += 1
+                print(
+                    "[published] {} -> {}".format(row[2], message_id),
+                    flush=True,
+                )
+            except Exception as exc:
+                print(
+                    "[publish failed] {}: {}".format(row[2], exc),
+                    flush=True,
+                )
+    finally:
+        con.close()
+
+    return count
 
 
 def publish_pending(limit=20):
@@ -129,11 +180,7 @@ def publish_pending(limit=20):
         for row in rows:
             try:
                 message_id = publisher.publish_row(row)
-                con.execute(
-                    "UPDATE posts SET published=1, telegram_message_id=? WHERE id=?",
-                    (message_id, row[0]),
-                )
-                con.commit()
+                _mark_published(con, row[0], message_id)
                 count += 1
                 print("[published] {} -> {}".format(row[2], message_id), flush=True)
             except Exception as exc:
