@@ -227,7 +227,9 @@ async def callback(_, query):
         started = time.monotonic()
 
         try:
-            await app.send_video(
+            # send_video only returns after Telegram has accepted the upload.
+            # Delete the local source file only after a successful upload.
+            sent_message = await app.send_video(
                 chat_id=query.message.chat.id,
                 video=str(output),
                 caption=f"{ep['title']} — {label}",
@@ -235,10 +237,15 @@ async def callback(_, query):
                 progress=upload_progress,
                 progress_args=(status, started),
             )
-        finally:
+        except Exception:
+            # Keep the downloaded file when Telegram upload fails so the
+            # caller can inspect/retry it instead of losing the source.
+            raise
+        else:
+            # Upload succeeded: Telegram has its own copy, so the local
+            # downloaded video is no longer needed.
             output.unlink(missing_ok=True)
-
-        await status.delete()
+            await status.delete()
 
     except Exception as exc:
         await query.message.reply_text("❌ " + str(exc))
