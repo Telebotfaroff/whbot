@@ -492,6 +492,14 @@ async def ping_command(_, message):
 @app.on_message(filters.command("debug"))
 async def debug_command(_, message):
     print("[command] /debug chat_id={}".format(message.chat.id), flush=True)
+
+    lines = [
+        "🧪 <b>WHBot diagnostics</b>",
+        "",
+        "✅ Bot handler: working",
+        "📁 DB: <code>{}</code>".format(DB_PATH),
+    ]
+
     try:
         con = init_db()
         try:
@@ -500,19 +508,105 @@ async def debug_command(_, message):
         finally:
             con.close()
 
-        await message.reply_text(
-            "🧪 <b>WHBot diagnostics</b>\n\n"
-            "✅ Bot handler: working\n"
-            "📁 DB: <code>{}</code>\n"
-            "📄 Posts: <b>{}</b>\n"
-            "📚 Series: <b>{}</b>\n"
+        lines += [
+            "📄 Posts: <b>{}</b>".format(posts),
+            "📚 Series: <b>{}</b>".format(series),
             "📥 Download channel: <code>{}</code>".format(
-                DB_PATH, posts, series, DOWNLOAD_CHANNEL_ID or "NOT SET"
-            )
+                DOWNLOAD_CHANNEL_ID or "NOT SET"
+            ),
+            "",
+        ]
+    except Exception as exc:
+        lines += [
+            "❌ DB check failed: <code>{}</code>".format(html.escape(str(exc))),
+            "",
+        ]
+
+    # Identify the exact bot account represented by BOT_TOKEN.
+    try:
+        me = await app.get_me()
+        bot_username = "@{}".format(me.username) if me.username else "(no username)"
+        lines += [
+            "🤖 <b>Pyrogram bot identity</b>",
+            "Name: <b>{}</b>".format(html.escape(me.first_name or "")),
+            "Username: <b>{}</b>".format(html.escape(bot_username)),
+            "User ID: <code>{}</code>".format(me.id),
+            "",
+        ]
+        print(
+            "[telegram debug] bot identity: id={} username={}".format(
+                me.id, bot_username
+            ),
+            flush=True,
         )
     except Exception as exc:
-        print("[command] /debug FAILED: {}".format(exc), flush=True)
-        await message.reply_text("❌ DEBUG FAILED: " + html.escape(str(exc)))
+        lines += [
+            "❌ <b>get_me()</b> failed: <code>{}</code>".format(
+                html.escape(str(exc))
+            ),
+            "",
+        ]
+        print("[telegram debug] get_me failed: {}".format(exc), flush=True)
+
+    if not DOWNLOAD_CHANNEL_ID:
+        lines.append("⚠️ DOWNLOAD_CHANNEL_ID is not configured.")
+        await message.reply_text("\n".join(lines))
+        return
+
+    # Test the two relevant Pyrogram peer-resolution paths separately.
+    try:
+        chat = await app.get_chat(DOWNLOAD_CHANNEL_ID)
+        title = (
+            getattr(chat, "title", None)
+            or getattr(chat, "username", None)
+            or "unknown"
+        )
+        chat_type = (
+            getattr(getattr(chat, "type", None), "value", None)
+            or getattr(chat, "type", None)
+            or "unknown"
+        )
+        lines += [
+            "✅ <b>get_chat()</b>: OK",
+            "Channel ID: <code>{}</code>".format(chat.id),
+            "Title: <b>{}</b>".format(html.escape(str(title))),
+            "Type: <b>{}</b>".format(html.escape(str(chat_type))),
+        ]
+        print(
+            "[telegram debug] get_chat OK: id={} title={} type={}".format(
+                chat.id, title, chat_type
+            ),
+            flush=True,
+        )
+    except Exception as exc:
+        lines += [
+            "❌ <b>get_chat()</b>: FAILED",
+            "<code>{}</code>".format(html.escape(str(exc))),
+        ]
+        print("[telegram debug] get_chat FAILED: {}".format(exc), flush=True)
+
+    try:
+        peer = await app.resolve_peer(DOWNLOAD_CHANNEL_ID)
+        lines += [
+            "✅ <b>resolve_peer()</b>: OK",
+            "Peer type: <code>{}</code>".format(type(peer).__name__),
+        ]
+        print(
+            "[telegram debug] resolve_peer OK: {}".format(type(peer).__name__),
+            flush=True,
+        )
+    except Exception as exc:
+        lines += [
+            "❌ <b>resolve_peer()</b>: FAILED",
+            "<code>{}</code>".format(html.escape(str(exc))),
+        ]
+        print(
+            "[telegram debug] resolve_peer FAILED: {}".format(exc),
+            flush=True,
+        )
+
+    await message.reply_text("\n".join(lines))
+
 
 
 @app.on_message(filters.all, group=99)
