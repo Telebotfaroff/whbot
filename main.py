@@ -178,7 +178,7 @@ async def search(_, message):
         for item in results[:10]:
             try:
                 ep = await asyncio.to_thread(
-                    provider.get_episode, item["page_url"], False
+                    provider.get_episode, item["page_url"], True
                 )
                 await show(message, ep)
             except Exception as exc:
