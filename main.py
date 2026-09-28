@@ -759,30 +759,75 @@ async def start_series_download(message, series_url, status=None, raise_on_error
             episode_items.sort(key=episode_number)
 
             for index, item in enumerate(episode_items, 1):
+                print(
+                    "[series download] episode {}/{} url={}".format(
+                        index, total, item["page_url"]
+                    ),
+                    flush=True,
+                )
                 ep = await asyncio.to_thread(
                     provider.get_episode, item["page_url"], True
                 )
-                source = choose_source(ep)
-                if not source:
+                sources = ep.get("sources") or []
+                if not sources:
                     raise ProviderError(
                         f"Episode {index}/{total} has no downloadable video source."
                     )
 
-                await safe_edit(
-                    status,
-                    "⬇️ <b>Episode {}/{}</b> — resolving <b>{}</b>...".format(
-                        index, total, html.escape(source["label"])
+                # Try qualities from highest to lowest. If a CDN/source fails,
+                # the episode gets another available source before the whole
+                # series is stopped.
+                order = {"2160p": 4, "1440p": 3, "1080p": 2, "720p": 1}
+                sources = sorted(
+                    sources,
+                    key=lambda source: order.get(
+                        str(source.get("label", "")).lower(), 0
                     ),
+                    reverse=True,
                 )
 
-                await download_and_send(
-                    ep,
-                    DOWNLOAD_CHANNEL_ID,
-                    preferred_quality=source["label"],
-                    status=status,
-                    series_name=series["name"],
-                    series_total=total,
-                )
+                last_error = None
+                uploaded = False
+                for source in sources:
+                    label = str(source.get("label") or "Unknown")
+                    await safe_edit(
+                        status,
+                        "⬇️ <b>Episode {}/{}</b> — downloading <b>{}</b>...".format(
+                            index, total, html.escape(label)
+                        ),
+                    )
+                    print(
+                        "[series download] trying episode {} quality={}".format(
+                            index, label
+                        ),
+                        flush=True,
+                    )
+                    try:
+                        await download_and_send(
+                            ep,
+                            DOWNLOAD_CHANNEL_ID,
+                            preferred_quality=label,
+                            status=status,
+                            series_name=series["name"],
+                            series_total=total,
+                        )
+                        uploaded = True
+                        break
+                    except Exception as source_exc:
+                        last_error = source_exc
+                        print(
+                            "[series download] quality {} failed: {}".format(
+                                label, source_exc
+                            ),
+                            flush=True,
+                        )
+
+                if not uploaded:
+                    raise ProviderError(
+                        "Episode {}/{} failed for all available sources: {}".format(
+                            index, total, last_error or "unknown error"
+                        )
+                    )
 
                 await safe_edit(
                     status,
@@ -798,7 +843,14 @@ async def start_series_download(message, series_url, status=None, raise_on_error
                 f"Episodes: <b>{total}</b>",
             )
     except Exception as exc:
-        await safe_edit(status, "❌ Download failed: " + html.escape(str(exc)))
+        print(
+            "[series download] FAILED: {}: {}".format(type(exc).__name__, exc),
+            flush=True,
+        )
+        await safe_edit(
+            status,
+            "❌ Download failed: " + html.escape(str(exc)),
+        )
         if raise_on_error:
             raise
     finally:
