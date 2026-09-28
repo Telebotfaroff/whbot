@@ -739,11 +739,20 @@ async def callback(_, query):
         encoded_page, encoded_label = query.data[3:].split(":", 1)
         page_url = dec(encoded_page)
         label = dec(encoded_label)
+        status = await query.message.reply_text(
+            f"⬇️ Resolving <b>{html.escape(label)}</b>..."
+        )
         ep = await asyncio.to_thread(provider.get_episode, page_url, True)
 
-        status = await query.message.reply_text(
-            f"⬇️ Preparing <b>{html.escape(label)}</b>..."
-        )
+        available = {
+            str(source.get("label", "")).lower(): source
+            for source in (ep.get("sources") or [])
+        }
+        if label.lower() not in available:
+            raise ProviderError(
+                "Requested quality is not available. Available: "
+                + (", ".join(sorted(available)) or "none")
+            )
         try:
             await download_and_send(
                 ep,
