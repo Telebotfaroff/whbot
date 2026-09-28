@@ -2,102 +2,124 @@
 
 Python Telegram bot using Pyrogram and the WatchHentai provider.
 
-## Railway deployment
+## 🚀 Google Colab
 
-The railway-ready branch is intended to run as a single persistent Railway service.
+This branch is designed for **Google Colab**.
 
-Railway can deploy directly from a GitHub repository and supports custom start commands such as python main.py. See the Railway services documentation.
+### Open in Google Colab
 
-Railway settings:
+[![Open in Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/Telebotfaroff/whbot/blob/colab-ready/WHBot_Colab.ipynb)
 
-    GitHub repository: Telebotfaroff/whbot
-    Branch: railway-ready
-    Build command: pip install -r requirements.txt
-    Start command: python main.py
+The notebook is designed to:
+1. Mount Google Drive.
+2. Clone this branch.
+3. Install dependencies.
+4. Create persistent folders.
+5. Load the complete environment configuration from **one `.env` block**.
+6. Start WHBot.
 
-No public web server is required. The process is a long-running Telegram bot.
+> **Important:** Colab runtimes are temporary. Google Drive keeps the SQLite database and downloads, but the bot stops when the Colab runtime disconnects.
 
-## Required variables
+## 🔐 Environment variables
 
-Add these in Railway Variables:
+You can paste the **entire `.env` file at once** when the notebook asks for it. Do not enter each variable separately.
 
-    API_ID=your_api_id
-    API_HASH=your_api_hash
-    BOT_TOKEN=your_bot_token
-    CHANNEL_ID=@your_channel
+Use this template:
 
-Also add:
+```env
+API_ID=your_api_id
+API_HASH=your_api_hash
+BOT_TOKEN=your_bot_token
 
-    WATCHHENTAI_BASE_URL=https://watchhentai.net
-    WH_DB_PATH=/app/data/watchhentai.db
-    DOWNLOAD_DIR=/app/data/downloads
-    TELEGRAM_CHANNEL_INTERVAL=1.2
-    SCHEDULER_ENABLED=true
-    CRAWL_INTERVAL=1800
-    CRAWL_PAGES=1
-    PUBLISH_LIMIT=20
-    INITIAL_CRAWL_PAGES=0
+WATCHHENTAI_BASE_URL=https://watchhentai.net
 
-## Persistent volume
+DOWNLOAD_DIR=/content/drive/MyDrive/whbot/downloads
+WH_DB_PATH=/content/drive/MyDrive/whbot/data/watchhentai.db
 
-Railway's normal service filesystem is ephemeral. Data that must survive deployments should be stored on a Railway Volume. Railway documents that application paths are under /app, so mount the volume at /app/data.
+CHANNEL_ID=your_channel_id
+TELEGRAM_CHANNEL_INTERVAL=1.2
 
-Create a Railway Volume and set its Mount Path to:
+SCHEDULER_ENABLED=true
+CRAWL_INTERVAL=1800
+CRAWL_PAGES=1
+PUBLISH_LIMIT=20
+INITIAL_CRAWL_PAGES=0
+```
 
-    /app/data
+The notebook writes that complete block to `.env`, so there is **no need to manually create the file or enter variables one by one**.
 
-Then use:
+### Initial catalog import
 
-    WH_DB_PATH=/app/data/watchhentai.db
-    DOWNLOAD_DIR=/app/data/downloads
+Start with:
 
-The SQLite catalog and downloaded files will then use the persistent volume.
+```env
+INITIAL_CRAWL_PAGES=0
+```
 
-Railway currently lists 0.5 GB volumes for Free/Trial plans and 5 GB for Hobby.
+After confirming the bot works, set:
 
-## First deployment
+```env
+INITIAL_CRAWL_PAGES=121
+```
 
-For the first deployment, leave:
+to perform the historical crawl. After it completes, set it back to `0`.
 
-    INITIAL_CRAWL_PAGES=0
+## 💾 Google Drive persistence
 
-Deploy the bot first and verify that it starts.
+```text
+/content/drive/MyDrive/whbot/
+├── data/
+│   └── watchhentai.db
+└── downloads/
+```
 
-If you want the full historical catalog imported automatically, temporarily set:
+This keeps the SQLite catalog and downloaded files across Colab runtime restarts.
 
-    INITIAL_CRAWL_PAGES=121
+## ⚙️ Colab setup
 
-After the initial import finishes, change it back to:
+If running manually:
 
-    INITIAL_CRAWL_PAGES=0
+```bash
+git clone -b colab-ready https://github.com/Telebotfaroff/whbot.git
+cd whbot
+pip install -r requirements.txt
+python main.py
+```
 
-The normal scheduler checks the newest page every 30 minutes and publishes newly discovered entries.
+For the easiest setup, use the **Open in Colab** button above.
 
-## Telegram publishing
+## 🤖 Bot commands
 
-The publisher spaces channel sends by at least 1.2 seconds and handles Telegram HTTP 429 retry_after responses.
+```text
+/start
+/help
+/latest
+/search <query>
+/episode <URL>
+/stats
+/crawl
+/publish
+```
 
-It stores the Telegram message ID in SQLite and marks successful posts as published, preventing normal duplicate publishing.
+## 📢 Telegram publishing
 
-The publisher posts catalog metadata, thumbnail and source page link. It does not automatically upload source video files to the channel.
+The publisher:
+- Spaces channel messages using `TELEGRAM_CHANNEL_INTERVAL`.
+- Handles Telegram `429 retry_after` responses.
+- Stores Telegram message IDs in SQLite.
+- Marks successfully published posts to avoid normal duplicate publishing.
+- Publishes catalog metadata, thumbnail and source page link.
 
-## Bot commands
+## 🧪 Local development
 
-    /start
-    /help
-    /latest
-    /search <query>
-    /episode <URL>
-    /stats
-    /crawl
-    /publish
+```bash
+python3 -m pip install -r requirements.txt
+python3 main.py
+```
 
-## Local development
+For local paths:
 
-    python3 -m pip install -r requirements.txt
-    python3 main.py
-
-Local paths can be overridden with:
-
-    WH_DB_PATH=./data/watchhentai.db
-    DOWNLOAD_DIR=./downloads
+```env
+WH_DB_PATH=./data/watchhentai.db
+DOWNLOAD_DIR=./downloads
+```
