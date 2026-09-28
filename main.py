@@ -27,6 +27,7 @@ API_HASH = os.getenv("API_HASH")
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHANNEL_ID = os.getenv("CHANNEL_ID")
 DOWNLOAD_CHANNEL_ID = os.getenv("DOWNLOAD_CHANNEL_ID")
+BOT_OWNER_ID = int(os.getenv("BOT_OWNER_ID", "0") or 0)
 
 if not API_ID or not API_HASH or not BOT_TOKEN:
     raise RuntimeError("API_ID, API_HASH and BOT_TOKEN are required")
@@ -49,6 +50,7 @@ AUTO_LOCK = asyncio.Lock()
 AUTO_STOP = threading.Event()
 CRAWL_STATES = {}
 DOWNLOAD_STATES = {}
+CHANNEL_SETUP_USERS = set()
 
 app = Client(
     "whbot",
@@ -221,6 +223,37 @@ def video_metadata(path):
         }
     except Exception:
         return {"duration": 0, "width": 0, "height": 0}
+
+
+def load_download_channel_setting():
+    """Load a previously verified download channel from SQLite."""
+    global DOWNLOAD_CHANNEL_ID
+    con = init_db()
+    try:
+        con.execute("CREATE TABLE IF NOT EXISTS bot_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+        row = con.execute("SELECT value FROM bot_settings WHERE key='download_channel_id'").fetchone()
+        if row and row[0]:
+            DOWNLOAD_CHANNEL_ID = row[0]
+    finally:
+        con.close()
+
+
+def save_download_channel_setting(channel_id):
+    """Persist a verified download channel across restarts."""
+    global DOWNLOAD_CHANNEL_ID
+    channel_id = str(channel_id)
+    con = init_db()
+    try:
+        con.execute("CREATE TABLE IF NOT EXISTS bot_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+        con.execute("INSERT OR REPLACE INTO bot_settings(key, value) VALUES (?, ?)", ("download_channel_id", channel_id))
+        con.commit()
+    finally:
+        con.close()
+    DOWNLOAD_CHANNEL_ID = channel_id
+
+
+def owner_only(message):
+    return bool(BOT_OWNER_ID and message.from_user and message.from_user.id == BOT_OWNER_ID)
 
 
 def db_rows(query, params=()):
@@ -678,13 +711,74 @@ async def help_command(_, message):
         "/stats — catalog statistics\n"
         "/crawl — crawl series pages into the catalog\n"
         "/download — download an entire series to the download channel\n"
-        "/publish — publish catalog metadata\n\n"
+        "/publish — publish catalog metadata\n"
+        "/setchannel — configure the download channel\n\n"
         "🤖 <b>Auto uploader</b>\n"
         "/auto — download and upload all pending episodes sequentially\n"
         "/auto 720p — use 720p when available\n"
         "/auto stop — stop after the current transfer\n\n"
         "⬇️ Open an episode to view qualities and download it."
     )
+
+
+@app.on_message(filters.command("setchannel"))
+async def setchannel_command(_, message):
+    if not owner_only(message):
+        await message.reply_text("❌ This command is restricted to the bot owner.")
+        return
+    if message.chat.type.value != "private":
+        await message.reply_text("⚠️ Please use /setchannel in the bot's private chat.")
+        return
+    CHANNEL_SETUP_USERS.add(message.from_user.id)
+    await message.reply_text(
+        "📥 <b>Download channel setup</b>\n\n"
+        "1️⃣ Add me to your target channel as an <b>Administrator</b>.\n"
+        "2️⃣ Open that channel and send exactly <code>/verify</code>.\n"
+        "3️⃣ I will detect the channel, verify my admin access, and save it as the download channel.\n\n"
+        "❌ No channel ID is required."
+    )
+
+
+@app.on_message(filters.regex(r"^/verify(?:@\w+)?(?:\s+.*)?$"), group=-1)
+async def verify_channel_command(_, message):
+    chat = getattr(message, "chat", None)
+    chat_type = getattr(getattr(chat, "type", None), "value", None)
+    if not chat or chat_type != "channel":
+        return
+    if not BOT_OWNER_ID:
+        print("[telegram setup] BOT_OWNER_ID is not configured; /verify rejected", flush=True)
+        return
+    if message.from_user and message.from_user.id != BOT_OWNER_ID:
+        return
+    if not message.from_user and not CHANNEL_SETUP_USERS:
+        return
+    try:
+        me = await app.get_me()
+        member = await app.get_chat_member(chat.id, me.id)
+        status = getattr(member, "status", None)
+        status_value = getattr(status, "value", None) or str(status)
+        if status_value not in {"administrator", "owner"}:
+            await app.send_message(chat.id, "❌ I received /verify, but I am not an administrator of this channel. Please promote me to administrator and send /verify again.")
+            return
+        peer = await app.resolve_peer(chat.id)
+        save_download_channel_setting(chat.id)
+        CHANNEL_SETUP_USERS.clear()
+        title = getattr(chat, "title", None) or getattr(chat, "username", None) or "Unknown"
+        print("[telegram setup] VERIFIED channel id={} title={} status={} peer={}".format(chat.id, title, status_value, type(peer).__name__), flush=True)
+        await app.send_message(
+            chat.id,
+            "✅ <b>Download channel verified!</b>\n\n"
+            "📥 Channel: <b>{}</b>\n"
+            "🆔 ID: <code>{}</code>\n"
+            "👑 Bot status: <b>{}</b>\n\n"
+            "This channel is now saved as the WatchHentaiBot download channel.".format(html.escape(str(title)), chat.id, html.escape(status_value)),
+        )
+    except Exception as exc:
+        print("[telegram setup] /verify FAILED: {}".format(exc), flush=True)
+        try:
+            await app.send_message(chat.id, "❌ <b>Channel verification failed</b>\n<code>{}</code>".format(html.escape(str(exc))))
+        except Exception:
+            pass
 
 
 @app.on_message(filters.command("start"))
@@ -698,7 +792,8 @@ async def start(_, message):
         "/crawl - crawl series catalog\n"
         "/download - download a complete series to the download channel\n"
         "/publish - publish catalog metadata\n"
-        "/auto - sequentially upload pending episodes"
+        "/auto - sequentially upload pending episodes\n"
+        "/setchannel - configure the download channel"
     )
 
 
@@ -1584,6 +1679,8 @@ def start_background_scheduler():
 
 async def main():
     print("WHBot starting", flush=True)
+    load_download_channel_setting()
+    print("[telegram] configured download channel: {}".format(DOWNLOAD_CHANNEL_ID or "NOT SET"), flush=True)
     await app.start()
     try:
         # Resolve the configured upload channel using this exact Pyrogram bot
