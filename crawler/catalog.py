@@ -53,6 +53,12 @@ def init_db(db=DB_PATH):
     if "telegram_message_id" not in series_columns:
         con.execute("ALTER TABLE series ADD COLUMN telegram_message_id INTEGER")
 
+    # Remove legacy non-detail series URLs that may have been stored by older crawls.
+    # This includes filtered archive URLs and pagination URLs.
+    con.execute(
+        "DELETE FROM series WHERE url LIKE '%?%' OR url LIKE '%/series/page/%'"
+    )
+
     con.execute("CREATE INDEX IF NOT EXISTS idx_series_url ON series(url)")
     con.execute("CREATE INDEX IF NOT EXISTS idx_posts_url ON posts(url)")
     con.execute("CREATE INDEX IF NOT EXISTS idx_posts_series_episode ON posts(series_url, episode, id)")
