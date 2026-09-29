@@ -1425,6 +1425,7 @@ async def download_series(
     acquire_lock=True,
     fallback_chat_id=None,
     merge_chat_id=None,
+    merge_series=False,
 ):
 
     upload_chat = DOWNLOAD_CHANNEL_ID
