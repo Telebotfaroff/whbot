@@ -7,6 +7,12 @@ It does not call get_episode(), download(), GoFile, or Telegram.
 import os
 import re
 import sys
+from pathlib import Path
+
+# Make the repository root importable when this script is run as tests/test_series_scraper.py.
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 from providers.watchhentai import ProviderError, WatchHentai
 
