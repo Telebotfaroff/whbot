@@ -1,10 +1,8 @@
 """Build the WatchHentai series index from listing pages only.
 
-This crawler intentionally uses only:
-  /series/
-  /series/page/2/
-  ...
-It does NOT request individual /series/<slug>/ detail pages.
+This crawler first discovers series posts from listing pages, then opens each
+series post to extract its individual episode page URLs. It does NOT resolve
+media sources and does NOT download episodes.
 """
 
 import json
@@ -138,7 +136,19 @@ def scrape_listing(provider, page):
         card = find_card(anchor)
         title = extract_title(anchor, card)
         thumbnail = extract_thumbnail(card, anchor)
-        total_episodes = extract_total_episodes(card.get_text(" ", strip=True))
+        # Open the series post and extract its individual episode page URLs.
+        # This does not resolve media sources or download any episode.
+        episodes = provider.series_episodes(detail_url)
+        episode_records = [
+            {
+                "episode": index,
+                "url": episode["page_url"],
+            }
+            for index, episode in enumerate(episodes, 1)
+        ]
+        total_episodes = len(episode_records) or extract_total_episodes(
+            card.get_text(" ", strip=True)
+        )
 
         seen.add(detail_url)
         records.append({
@@ -147,6 +157,7 @@ def scrape_listing(provider, page):
             "link": detail_url,
             "thumbnail": thumbnail,
             "total_episodes": total_episodes,
+            "episodes": episode_records,
             "source_page": source_page,
             "page": page,
         })
@@ -184,7 +195,7 @@ def main():
             records = scrape_listing(provider, page)
             write_page(page, records)
             total_records += len(records)
-            print(f"[index] page {page}: {len(records)} series records", flush=True)
+            print(f"[index] page {page}: {len(records)} series posts", flush=True)
         except Exception as exc:
             raise ProviderError(f"Failed to scrape listing page {page}: {exc}") from exc
 
