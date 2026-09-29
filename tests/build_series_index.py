@@ -209,6 +209,9 @@ def scrape_listing(provider, page, progress):
 
         progress["posts"] += 1
         progress["episodes"] += len(episode_records)
+        progress["last_page"] = page
+        progress["last_post"] = title
+        progress["last_post_url"] = detail_url
         write_scrape_log(
             status="running",
             page=page,
@@ -244,7 +247,13 @@ def main():
     OUTPUT_ROOT.mkdir(parents=True, exist_ok=True)
     provider = WatchHentai()
 
-    progress = {"posts": 0, "episodes": 0}
+    progress = {
+        "posts": 0,
+        "episodes": 0,
+        "last_page": None,
+        "last_post": None,
+        "last_post_url": None,
+    }
     write_scrape_log(
         status="started",
         posts_scraped=0,
@@ -272,7 +281,9 @@ def main():
     except Exception as exc:
         write_scrape_log(
             status="failed",
-            page=None,
+            page=progress["last_page"],
+            post_title=progress["last_post"],
+            post_url=progress["last_post_url"],
             posts_scraped=progress["posts"],
             episodes_scraped=progress["episodes"],
             error=str(exc),
