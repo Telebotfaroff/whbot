@@ -335,6 +335,71 @@ def _merge_safe_name(value):
     )[:80] or "merged"
 
 
+def merge_progress_factory(status, total_duration):
+    state = {"last": 0.0, "last_percent": -1.0}
+
+    def progress(out_seconds, speed):
+        if status is None:
+            return
+        now = time.monotonic()
+        percent = (
+            min(max(out_seconds * 100.0 / total_duration, 0.0), 100.0)
+            if total_duration > 0 else 0.0
+        )
+        if percent < 100.0 and now - state["last"] < PROGRESS_UPDATE_INTERVAL:
+            return
+        state["last"] = now
+        state["last_percent"] = percent
+        bar = progress_bar(percent)
+        text = (
+            "🎞️ <b>Encoding merged video</b>\n"
+            f"<code>[{bar}] {percent:5.1f}%</code>\n"
+            f"🎮 <b>Encoder:</b> {html.escape(speed.get('encoder', 'NVENC/CPU'))}\n"
+            f"⏱ <b>{format_time(out_seconds)}</b> / "
+            f"<b>{format_time(total_duration)}</b>\n"
+            f"⚡ <b>{html.escape(speed.get('speed', '?'))}</b>"
+        )
+        asyncio.run_coroutine_threadsafe(safe_edit(status, text), app.loop)
+
+    return progress
+
+
+def _ffmpeg_input_duration(ffmpeg, path):
+    try:
+        probe = subprocess.run(
+            [
+                ffmpeg,
+                "-hide_banner",
+                "-i", str(path),
+                "-f", "null",
+                "-",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        # FFmpeg writes duration to stderr. Use ffprobe when available for
+        # reliable machine-readable duration.
+        ffprobe = shutil.which("ffprobe")
+        if ffprobe:
+            result = subprocess.run(
+                [
+                    ffprobe,
+                    "-v", "error",
+                    "-show_entries", "format=duration",
+                    "-of", "default=noprint_wrappers=1:nokey=1",
+                    str(path),
+                ],
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            return float((result.stdout or "").strip())
+    except (OSError, ValueError, subprocess.SubprocessError):
+        pass
+    return 0.0
+
+
 def detect_merge_encoder(ffmpeg):
     """Select NVENC when explicitly requested or auto-detected, else CPU."""
     mode = os.getenv("MERGE_ENCODER", "auto").strip().lower()
@@ -395,12 +460,13 @@ def detect_merge_encoder(ffmpeg):
     return "cpu"
 
 
-def merge_videos_sync(input_paths, output_path):
+def merge_videos_sync(input_paths, output_path, progress_callback=None):
     ffmpeg = shutil.which("ffmpeg")
     if not ffmpeg:
         raise RuntimeError("ffmpeg is not installed in this runtime.")
 
     encoder = detect_merge_encoder(ffmpeg)
+    total_duration = sum(_ffmpeg_input_duration(ffmpeg, path) for path in input_paths)
 
     # The concat filter normalizes different inputs into one MP4 before encoding.
     inputs = []
@@ -461,10 +527,47 @@ def merge_videos_sync(input_paths, output_path):
         ),
         flush=True,
     )
-    result = subprocess.run(
+
+    # Ask FFmpeg for machine-readable progress so Telegram can edit one
+    # status message instead of sending a new message for every update.
+    command += ["-progress", "pipe:1", "-nostats"]
+    process = subprocess.Popen(
         command,
-        capture_output=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
         text=True,
+        bufsize=1,
+    )
+    progress_data = {}
+    while True:
+        line = process.stdout.readline() if process.stdout else ""
+        if not line:
+            break
+        line = line.strip()
+        if "=" in line:
+            key, value = line.split("=", 1)
+            progress_data[key] = value
+            if key == "progress":
+                try:
+                    out_seconds = float(progress_data.get("out_time_ms", "0")) / 1000000.0
+                except ValueError:
+                    out_seconds = 0.0
+                if progress_callback:
+                    progress_callback(
+                        out_seconds,
+                        {
+                            "speed": progress_data.get("speed", "?"),
+                            "encoder": "NVIDIA NVENC" if encoder == "gpu" else "CPU/libx264",
+                        },
+                    )
+                progress_data = {}
+    stderr = process.stderr.read() if process.stderr else ""
+    process.wait()
+    result = subprocess.CompletedProcess(
+        command,
+        process.returncode,
+        stdout="",
+        stderr=stderr,
     )
 
     if result.returncode != 0 and encoder == "gpu" and os.getenv("MERGE_ENCODER", "auto").strip().lower() == "auto":
@@ -614,7 +717,27 @@ async def run_merge_session(chat_id, status):
                 len(files)
             ),
         )
-        await asyncio.to_thread(merge_videos_sync, files, output)
+        total_duration = sum(
+            await asyncio.to_thread(_ffmpeg_input_duration, shutil.which("ffmpeg"), path)
+            for path in files
+        )
+        encoder_label = (
+            "NVIDIA NVENC" if os.getenv("MERGE_ENCODER", "auto").strip().lower() != "cpu"
+            else "CPU/libx264"
+        )
+        await safe_edit(
+            status,
+            "⚙️ <b>Preparing merge</b>\n"
+            f"📹 Parts: <b>{len(files)}</b>\n"
+            f"⏱ Total source duration: <b>{format_time(total_duration)}</b>\n"
+            f"🎮 Encoder mode: <b>{encoder_label}</b>",
+        )
+        await asyncio.to_thread(
+            merge_videos_sync,
+            files,
+            output,
+            merge_progress_factory(status, total_duration),
+        )
 
         metadata = await asyncio.to_thread(video_metadata, output)
         size = output.stat().st_size
