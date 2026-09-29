@@ -2049,9 +2049,8 @@ async def download_series(
                 "📋 Sending the episode menu...".format(len(series_episode_results)),
             )
             await send_series_episode_menu(upload_chat, series, series_episode_results)
-        else:
-            # The existing status message is reused until the episode menu
-            # is delivered; no separate completion notification is sent.
+        # The existing status message is reused throughout the operation;
+        # no separate completion notification is sent.
 
         if merge_series:
             chat_id = fallback_chat_id or (message.chat.id if message else None)
