@@ -30,4 +30,13 @@ jobs:
         env:
           WATCHHENTAI_BASE_URL: https://watchhentai.net
           SERIES_URL: ${{ inputs.series_url }}
+          SERIES_RESULT_FILE: series-result.txt
         run: python tests/test_series_scraper.py
+
+      - name: Upload scraper result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: series-scraper-result
+          path: series-result.txt
+          if-no-files-found: warn
