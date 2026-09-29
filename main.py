@@ -385,6 +385,34 @@ def _ffmpeg_input_duration(ffmpeg, path):
     except (OSError, ValueError, subprocess.SubprocessError):
         return 0.0
 
+def _ffmpeg_video_dimensions(path):
+    """Return the source video's width and height, or (0, 0) if unavailable."""
+    ffprobe = shutil.which("ffprobe")
+    if not ffprobe:
+        return 0, 0
+    try:
+        result = subprocess.run(
+            [
+                ffprobe,
+                "-v", "error",
+                "-select_streams", "v:0",
+                "-show_entries", "stream=width,height",
+                "-of", "csv=p=0:s=x",
+                str(path),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        raw = (result.stdout or "").strip().splitlines()
+        if not raw:
+            return 0, 0
+        width, height = raw[0].strip().split("x", 1)
+        return int(width), int(height)
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return 0, 0
+
+
 def detect_merge_encoder(ffmpeg):
     """Select NVENC when explicitly requested or auto-detected, else CPU."""
     mode = os.getenv("MERGE_ENCODER", "auto").strip().lower()
@@ -453,7 +481,29 @@ def merge_videos_sync(input_paths, output_path, progress_callback=None):
     encoder = detect_merge_encoder(ffmpeg)
     total_duration = sum(_ffmpeg_input_duration(ffmpeg, path) for path in input_paths)
 
-    # The concat filter normalizes different inputs into one MP4 before encoding.
+    # The concat filter requires every video input to have identical
+    # width/height/SAR. Pick a common even canvas based on the largest
+    # source dimensions, then scale+pad every input into that canvas while
+    # preserving aspect ratio.
+    dimensions = [_ffmpeg_video_dimensions(path) for path in input_paths]
+    valid_dimensions = [(w, h) for w, h in dimensions if w > 0 and h > 0]
+    if not valid_dimensions:
+        raise RuntimeError("ffprobe could not determine the input video dimensions.")
+
+    target_width = max(w for w, _ in valid_dimensions)
+    target_height = max(h for _, h in valid_dimensions)
+    target_width = max(target_width - (target_width % 2), 2)
+    target_height = max(target_height - (target_height % 2), 2)
+
+    print(
+        "[merge] common video canvas: {}x{} from inputs={}".format(
+            target_width,
+            target_height,
+            dimensions,
+        ),
+        flush=True,
+    )
+
     inputs = []
     for path in input_paths:
         inputs.extend(["-i", str(path)])
@@ -461,9 +511,12 @@ def merge_videos_sync(input_paths, output_path, progress_callback=None):
     filter_parts = []
     for index in range(len(input_paths)):
         filter_parts.append(
-            "[{0}:v:0]scale=trunc(iw/2)*2:trunc(ih/2)*2,"
+            "[{0}:v:0]scale={1}:{2}:force_original_aspect_ratio=decrease,"
+            "pad={1}:{2}:(ow-iw)/2:(oh-ih)/2,"
             "setsar=1,fps=30,format=yuv420p[v{0}];"
-            "[{0}:a:0]aresample=async=1:first_pts=0[a{0}];".format(index)
+            "[{0}:a:0]aresample=async=1:first_pts=0[a{0}];".format(
+                index, target_width, target_height
+            )
         )
 
     concat_inputs = "".join(
