@@ -463,7 +463,7 @@ def merge_videos_sync(input_paths, output_path, progress_callback=None):
         filter_parts.append(
             "[{0}:v:0]scale=trunc(iw/2)*2:trunc(ih/2)*2,"
             "setsar=1,fps=30,format=yuv420p[v{0}];"
-            "[{0}:a:0]aresample=async=1:first_pts=0[a{0}]".format(index)
+            "[{0}:a:0]aresample=async=1:first_pts=0[a{0}];".format(index)
         )
 
     concat_inputs = "".join(
