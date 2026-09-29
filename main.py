@@ -738,16 +738,19 @@ async def download_and_send(
             flush=True,
         )
 
+        # Telegram delivery for an individual episode:
+        # thumbnail -> episode title/details -> the public GoFile download link.
         caption = (
             f"🎬 <b>{html.escape(ep['title'])}</b>\n"
-            f"📺 Episode: <b>{ep.get('episode') or '?'}</b>\n"
-            f"🎥 Quality: <b>{html.escape(label)}</b>\n"
-            f"⏱ Duration: <b>{format_duration(metadata['duration'])}</b>\n\n"
-            f"☁️ <b>GoFile:</b> <a href=\"{html.escape(gofile_url, quote=True)}\">Download video</a>"
+            f"📺 <b>Episode:</b> {html.escape(str(ep.get('episode') or '?'))}\n"
+            f"🎥 <b>Quality:</b> {html.escape(label)}\n"
+            f"⏱ <b>Duration:</b> {format_duration(metadata['duration'])}\n\n"
+            f"☁️ <b>GoFile Link:</b> "
+            f'<a href="{html.escape(gofile_url, quote=True)}">Open / Download Episode</a>'
         )
 
         markup = InlineKeyboardMarkup([
-            [InlineKeyboardButton("⬇️ Download from GoFile", url=gofile_url)]
+            [InlineKeyboardButton("☁️ Open GoFile", url=gofile_url)]
         ])
 
         if status:
