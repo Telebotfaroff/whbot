@@ -19,6 +19,7 @@ from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from providers.watchhentai import WatchHentai, ProviderError
 from crawler.catalog import DB_PATH, init_db, crawl_series
 from publisher import publish_pending, publish_ids, publish_series_ids
+from gofile_uploader import GofileUploader
 
 load_dotenv()
 
@@ -429,87 +430,74 @@ async def download_and_send(
 
         size = output.stat().st_size
         print("[download] completed local file size={}".format(size), flush=True)
-        if size > MAX_UPLOAD_BYTES:
-            raise ProviderError(
-                "File is {:.2f} GB, above the 2 GB Pyrogram limit.".format(
-                    size / 1073741824
-                )
-            )
 
         metadata = await asyncio.to_thread(video_metadata, output)
-        print("[upload] ffprobe duration={} width={} height={}".format(
+        print("[gofile] ffprobe duration={} width={} height={}".format(
             metadata.get("duration"), metadata.get("width"), metadata.get("height")
         ), flush=True)
 
         if status:
-            await status.edit_text("🖼 Preparing thumbnail and Telegram metadata...")
+            await status.edit_text("☁️ Uploading video to GoFile...")
 
-        thumb_path = None
-        if ep.get("thumbnail"):
-            try:
-                thumb_path = await asyncio.to_thread(
-                    provider.download_thumbnail,
-                    ep["thumbnail"],
-                    thumb,
-                )
-            except Exception as exc:
-                print("[thumbnail] {}".format(exc), flush=True)
+        # Guest upload: no API token is supplied. GoFile creates a temporary
+        # guest account and returns a public downloadPage for this file.
+        uploader = GofileUploader()
+        started = time.monotonic()
+        gofile_url = await asyncio.to_thread(
+            uploader.upload,
+            output,
+        )
+        elapsed = max(time.monotonic() - started, 0.001)
+        print(
+            "[gofile] uploaded {} bytes in {:.1f}s ({:.2f} MB/s) -> {}".format(
+                size, elapsed, size / elapsed / 1048576, gofile_url
+            ),
+            flush=True,
+        )
 
-        duration = metadata["duration"]
         caption = (
             f"🎬 <b>{html.escape(ep['title'])}</b>\n"
             f"📺 Episode: <b>{ep.get('episode') or '?'}</b>\n"
             f"🎥 Quality: <b>{html.escape(label)}</b>\n"
-            f"⏱ Duration: <b>{format_duration(duration)}</b>"
+            f"⏱ Duration: <b>{format_duration(metadata['duration'])}</b>\n\n"
+            f"☁️ <b>GoFile:</b> <a href=\"{html.escape(gofile_url, quote=True)}\">Download video</a>"
         )
 
-        if status:
-            await status.edit_text("📤 Uploading video to Telegram...")
+        markup = InlineKeyboardMarkup([
+            [InlineKeyboardButton("⬇️ Download from GoFile", url=gofile_url)]
+        ])
 
-        started = time.monotonic()
-        print("[upload] waiting {}s before Telegram upload".format(TELEGRAM_UPLOAD_DELAY), flush=True)
-        await asyncio.sleep(TELEGRAM_UPLOAD_DELAY)
-        print("[upload] sending {} to chat {}".format(output.name, target_chat), flush=True)
+        if status:
+            await status.edit_text("📨 Sending GoFile link to Telegram...")
 
         sent = None
-        for upload_attempt in range(1, 4):
+        if thumb_path := (await asyncio.to_thread(
+            provider.download_thumbnail, ep["thumbnail"], thumb
+        ) if ep.get("thumbnail") else None):
             try:
-                sent = await app.send_video(
+                sent = await app.send_photo(
                     chat_id=target_chat,
-                    video=str(output),
-                    thumb=str(thumb_path) if thumb_path else None,
+                    photo=str(thumb_path),
                     caption=caption,
-                    duration=duration or None,
-                    width=metadata["width"] or None,
-                    height=metadata["height"] or None,
-                    file_name=output.name,
-                    supports_streaming=True,
-                    progress=upload_progress,
-                    progress_args=(status, started),
+                    reply_markup=markup,
                 )
-                break
-            except FloodWait as exc:
-                wait = max(int(getattr(exc, "value", 0) or 0), 1)
-                print(
-                    "[upload] Telegram FloodWait={}s attempt {}/3".format(
-                        wait, upload_attempt
-                    ),
-                    flush=True,
-                )
-                if upload_attempt >= 3:
-                    raise
-                await asyncio.sleep(wait + 1)
+            except Exception as exc:
+                print("[gofile] thumbnail message failed: {}".format(exc), flush=True)
 
         if sent is None:
-            raise ProviderError("Telegram upload did not return a message")
+            sent = await app.send_message(
+                chat_id=target_chat,
+                text=caption,
+                reply_markup=markup,
+            )
 
-        print("[upload] Telegram message id={}".format(sent.id), flush=True)
+        print("[gofile] Telegram link message id={}".format(sent.id), flush=True)
         if post_id is not None:
             mark_video_uploaded(post_id, sent.id)
 
         return sent
     except Exception as exc:
-        print("[download/upload] FAILED: {}".format(exc), flush=True)
+        print("[download/gofile] FAILED: {}".format(exc), flush=True)
         raise
     finally:
         output.unlink(missing_ok=True)
