@@ -822,14 +822,15 @@ async def run_merge_session(chat_id, status):
         markup = InlineKeyboardMarkup(
             [[InlineKeyboardButton("⬇️ Download from GoFile", url=gofile_url)]]
         )
-        await app.send_message(chat_id, caption, reply_markup=markup)
+        # Reuse the single status message for the final result. No separate
+        # completion notification is sent.
+        await safe_edit(status, caption, reply_markup=markup)
 
         # Only clean the source files after the final merge/upload succeeds.
         for path in files:
             path.unlink(missing_ok=True)
         output.unlink(missing_ok=True)
         MERGE_SESSIONS.pop(chat_id, None)
-        await safe_edit(status, "✅ <b>Merge complete.</b> The merged GoFile link was sent above.")
     except Exception as exc:
         await safe_edit(
             status,
@@ -2041,15 +2042,6 @@ async def download_series(
                     )
                 )
 
-            await safe_edit(
-                status,
-                (
-                    "✅ <b>Episode {}/{}</b> downloaded and kept for merging."
-                    if merge_series
-                    else "✅ <b>Episode {}/{}</b> uploaded to download channel."
-                ).format(index, total),
-            )
-
         if not merge_series:
             await safe_edit(
                 status,
@@ -2058,12 +2050,8 @@ async def download_series(
             )
             await send_series_episode_menu(upload_chat, series, series_episode_results)
         else:
-            await safe_edit(
-                status,
-                "🎉 <b>Series download complete</b>\n\n"
-                f"{html.escape(series['name'])}\n"
-                f"Episodes: <b>{total}</b>",
-            )
+            # The existing status message is reused until the episode menu
+            # is delivered; no separate completion notification is sent.
 
         if merge_series:
             chat_id = fallback_chat_id or (message.chat.id if message else None)
@@ -2082,8 +2070,9 @@ async def download_series(
                 )
             await safe_edit(
                 status,
-                "🎞️ <b>All {} episodes downloaded.</b>\n"
-                "🔗 Starting FFmpeg merge...".format(total),
+                "🎞️ <b>Encoding merged video...</b>\n"
+                f"📹 Parts: <b>{total}</b>\n"
+                "Preparing FFmpeg.",
             )
             await run_merge_session(chat_id, status)
         elif merge_chat_id:
