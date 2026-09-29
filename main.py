@@ -3,7 +3,9 @@ import html
 import json
 import os
 import re
+import shutil
 import sqlite3
+import subprocess
 import threading
 import time
 from pathlib import Path
@@ -188,6 +190,218 @@ def format_duration(seconds):
     if hours:
         return f"{hours}:{minutes:02d}:{secs:02d}"
     return f"{minutes}:{secs:02d}"
+
+
+PROGRESS_UPDATE_INTERVAL = max(
+    float(os.getenv("DOWNLOAD_PROGRESS_INTERVAL", "2.5")),
+    2.5,
+)
+
+
+async def safe_edit(message, text):
+    """Safely edit a Telegram status message without breaking the transfer."""
+    if message is None or not text:
+        return
+
+    current = getattr(message, "text", None) or getattr(message, "caption", None)
+    if current == text:
+        return
+
+    try:
+        await message.edit_text(text)
+    except FloodWait as exc:
+        wait = max(int(getattr(exc, "value", 0) or 0), 1)
+        print("[progress] FloodWait={}s".format(wait), flush=True)
+        await asyncio.sleep(wait)
+        try:
+            await message.edit_text(text)
+        except Exception as retry_exc:
+            print("[progress] edit retry failed: {}".format(retry_exc), flush=True)
+    except RPCError as exc:
+        # A progress update must never abort an otherwise healthy download.
+        print("[progress] edit skipped: {}".format(exc), flush=True)
+    except Exception as exc:
+        print("[progress] edit failed: {}".format(exc), flush=True)
+
+
+def _progress_bar(percent, width=14):
+    percent = max(0.0, min(float(percent), 100.0))
+    filled = int(round(width * percent / 100.0))
+    return "█" * filled + "░" * (width - filled)
+
+
+def _format_rate(bytes_per_second):
+    if bytes_per_second <= 0:
+        return "0 B/s"
+    units = ("B/s", "KB/s", "MB/s", "GB/s")
+    value = float(bytes_per_second)
+    for unit in units:
+        if value < 1024 or unit == units[-1]:
+            return "{:.0f} {}".format(value, unit) if unit == "B/s" else "{:.1f} {}".format(value, unit)
+        value /= 1024.0
+    return "0 B/s"
+
+
+def _format_eta(seconds):
+    if seconds is None or seconds < 0:
+        return "Unknown"
+    seconds = int(seconds)
+    if seconds < 60:
+        return "{}s".format(seconds)
+    minutes, secs = divmod(seconds, 60)
+    if minutes < 60:
+        return "{}m {}s".format(minutes, secs)
+    hours, minutes = divmod(minutes, 60)
+    return "{}h {}m".format(hours, minutes)
+
+
+def series_transfer_text(
+    series_name,
+    stage,
+    episode_index,
+    episode_total,
+    completed_count,
+    current_bytes,
+    total_bytes,
+    speed,
+    eta=None,
+):
+    """Build the single-message download/upload status used by series jobs."""
+    episode_total = max(int(episode_total or 1), 1)
+    episode_index = max(min(int(episode_index or 1), episode_total), 1)
+    completed_count = max(min(int(completed_count or 0), episode_total), 0)
+    total_bytes = int(total_bytes or 0)
+    current_bytes = max(int(current_bytes or 0), 0)
+
+    if total_bytes > 0:
+        percent = min(current_bytes * 100.0 / total_bytes, 100.0)
+    else:
+        percent = 0.0
+
+    stage_label = "📥 DOWNLOAD" if stage == "download" else "☁️ UPLOAD"
+    eta_text = _format_eta(eta)
+    progress_line = (
+        "[{}] {:.0f}%".format(_progress_bar(percent), percent)
+    )
+    size_line = (
+        "{} / {}".format(
+            _format_bytes(current_bytes),
+            _format_bytes(total_bytes),
+        )
+        if total_bytes > 0
+        else _format_bytes(current_bytes)
+    )
+
+    progress = []
+    for number in range(1, episode_total + 1):
+        if number <= completed_count:
+            progress.append("{} ✅".format(number))
+        elif number == episode_index:
+            progress.append("{} 🔄".format(number))
+        else:
+            progress.append("{} ⏳".format(number))
+
+    return (
+        "🎬 <b>{}</b>\n\n"
+        "{}\n"
+        "Episode {} / {}\n"
+        "{}\n"
+        "📦 {}\n"
+        "⚡ {}  •  ETA {}\n\n"
+        "📊 <b>Progress</b>\n"
+        "{}"
+    ).format(
+        html.escape(str(series_name)),
+        stage_label,
+        episode_index,
+        episode_total,
+        progress_line,
+        size_line,
+        _format_rate(speed),
+        eta_text,
+        "  ".join(progress),
+    )
+
+
+def _format_bytes(value):
+    value = max(float(value or 0), 0.0)
+    units = ("B", "KB", "MB", "GB", "TB")
+    for unit in units:
+        if value < 1024 or unit == units[-1]:
+            if unit == "B":
+                return "{:.0f} {}".format(value, unit)
+            return "{:.1f} {}".format(value, unit)
+        value /= 1024.0
+    return "0 B"
+
+
+def _make_transfer_progress(status, series_name, stage, episode_index, episode_total, completed_count):
+    state = {"last": 0.0, "last_text": ""}
+
+    def progress(current, total, started):
+        if status is None:
+            return
+
+        now = time.monotonic()
+        # The callbacks run in worker threads. Throttle Telegram edits here,
+        # while allowing the final 100% callback through immediately.
+        if now - state["last"] < PROGRESS_UPDATE_INTERVAL and not (
+            total and current >= total
+        ):
+            return
+
+        elapsed = max(now - started, 0.001)
+        speed = current / elapsed
+        eta = ((total - current) / speed) if total and speed > 0 else None
+        text_value = series_transfer_text(
+            series_name,
+            stage,
+            episode_index,
+            episode_total,
+            completed_count,
+            current,
+            total,
+            speed,
+            eta,
+        )
+        if text_value == state["last_text"]:
+            return
+
+        state["last"] = now
+        state["last_text"] = text_value
+        try:
+            future = asyncio.run_coroutine_threadsafe(
+                safe_edit(status, text_value),
+                app.loop,
+            )
+            # Do not wait on the Telegram API from the downloader/uploader thread.
+            future.add_done_callback(lambda f: f.exception() if not f.cancelled() else None)
+        except Exception as exc:
+            print("[progress] scheduling failed: {}".format(exc), flush=True)
+
+    return progress
+
+
+def download_progress_factory(status, series_name="Video", episode_index=1, episode_total=1, completed_count=0):
+    return _make_transfer_progress(
+        status,
+        series_name,
+        "download",
+        episode_index,
+        episode_total,
+        completed_count,
+    )
+
+
+def gofile_progress_factory(status, series_name="Video", episode_index=1, episode_total=1, completed_count=0):
+    return _make_transfer_progress(
+        status,
+        series_name,
+        "upload",
+        episode_index,
+        episode_total,
+        completed_count,
+    )
 
 
 def video_metadata(path):
