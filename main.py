@@ -365,40 +365,25 @@ def merge_progress_factory(status, total_duration):
 
 
 def _ffmpeg_input_duration(ffmpeg, path):
+    ffprobe = shutil.which("ffprobe")
+    if not ffprobe:
+        return 0.0
     try:
-        probe = subprocess.run(
+        result = subprocess.run(
             [
-                ffmpeg,
-                "-hide_banner",
-                "-i", str(path),
-                "-f", "null",
-                "-",
+                ffprobe,
+                "-v", "error",
+                "-show_entries", "format=duration",
+                "-of", "default=noprint_wrappers=1:nokey=1",
+                str(path),
             ],
             capture_output=True,
             text=True,
             timeout=30,
         )
-        # FFmpeg writes duration to stderr. Use ffprobe when available for
-        # reliable machine-readable duration.
-        ffprobe = shutil.which("ffprobe")
-        if ffprobe:
-            result = subprocess.run(
-                [
-                    ffprobe,
-                    "-v", "error",
-                    "-show_entries", "format=duration",
-                    "-of", "default=noprint_wrappers=1:nokey=1",
-                    str(path),
-                ],
-                capture_output=True,
-                text=True,
-                timeout=30,
-            )
-            return float((result.stdout or "").strip())
+        return float((result.stdout or "").strip())
     except (OSError, ValueError, subprocess.SubprocessError):
-        pass
-    return 0.0
-
+        return 0.0
 
 def detect_merge_encoder(ffmpeg):
     """Select NVENC when explicitly requested or auto-detected, else CPU."""
