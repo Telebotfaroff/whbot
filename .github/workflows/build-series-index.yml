@@ -35,14 +35,15 @@ jobs:
           SERIES_INDEX_PAGES: ${{ inputs.pages }}
         run: python tests/build_series_index.py
 
-      - name: Commit series index to repository
+      - name: Commit series index and scrape log
+        if: always()
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add whdata/
           if git diff --cached --quiet; then
-            echo "No series index changes."
+            echo "No series index or scrape log changes."
             exit 0
           fi
-          git commit -m "Update series index data"
+          git commit -m "Update series index and scrape log"
           git push
