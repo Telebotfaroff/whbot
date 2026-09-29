@@ -880,6 +880,45 @@ async def start(_, message):
         "/download <series URL> - download a complete series"
     )
 
+def extract_series_url(text):
+    """Return the first valid WatchHentai series URL found in arbitrary text."""
+    if not text:
+        return None
+    match = re.search(
+        r"https?://watchhentai\\.net/series/[^\\s<>\\\"']+",
+        text,
+        re.IGNORECASE,
+    )
+    if not match:
+        return None
+    return match.group(0).rstrip(".,!?)]}>")
+
+
+@app.on_message(filters.text, group=-2)
+async def auto_detect_series_link(_, message):
+    """Automatically start the normal series workflow when a series URL is pasted."""
+    text_value = getattr(message, "text", None) or ""
+    if not text_value or text_value.startswith("/"):
+        return
+
+    # A pending /download URL or another workflow should keep its existing
+    # behavior. This handler only handles a directly pasted series link.
+    if DOWNLOAD_STATES.get(message.chat.id) or CRAWL_STATES.get(message.chat.id):
+        return
+
+    series_url = extract_series_url(text_value)
+    if not series_url:
+        return
+
+    print(
+        "[auto-detect] series URL detected chat_id={} url={}".format(
+            message.chat.id, series_url
+        ),
+        flush=True,
+    )
+    await start_series_download(message, series_url)
+
+
 @app.on_message(filters.text)
 async def crawl_input(_, message):
     if message.text.startswith("/"):
