@@ -732,7 +732,11 @@ async def run_merge_session(chat_id, status):
         )
         uploader = GofileUploader()
         started = time.monotonic()
-        gofile_url = await asyncio.to_thread(uploader.upload, output)
+        gofile_url = await asyncio.to_thread(
+            uploader.upload,
+            output,
+            gofile_progress_factory(status),
+        )
         elapsed = max(time.monotonic() - started, 0.001)
 
         caption = (
