@@ -885,7 +885,7 @@ def extract_series_url(text):
     if not text:
         return None
     match = re.search(
-        r"https?://watchhentai\\.net/series/[^\\s<>\\\"']+",
+        r"https?://watchhentai\.net/series/[^\s<>\"']+",
         text,
         re.IGNORECASE,
     )
