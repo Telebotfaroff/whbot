@@ -335,14 +335,74 @@ def _merge_safe_name(value):
     )[:80] or "merged"
 
 
+def detect_merge_encoder(ffmpeg):
+    """Select NVENC when explicitly requested or auto-detected, else CPU."""
+    mode = os.getenv("MERGE_ENCODER", "auto").strip().lower()
+    if mode not in {"auto", "gpu", "cpu"}:
+        print("[merge] invalid MERGE_ENCODER={!r}; using auto".format(mode), flush=True)
+        mode = "auto"
+
+    if mode == "cpu":
+        print("[merge] encoder selected: CPU/libx264 (MERGE_ENCODER=cpu)", flush=True)
+        return "cpu"
+
+    nvidia_available = False
+    try:
+        probe = subprocess.run(
+            ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        gpu_name = (probe.stdout or "").strip().splitlines()[0] if probe.returncode == 0 else ""
+        nvidia_available = bool(gpu_name)
+        if gpu_name:
+            print("[merge] NVIDIA GPU detected: {}".format(gpu_name), flush=True)
+        else:
+            print("[merge] NVIDIA GPU unavailable", flush=True)
+    except (OSError, subprocess.SubprocessError) as exc:
+        print("[merge] NVIDIA GPU check failed: {}".format(exc), flush=True)
+
+    nvenc_available = False
+    try:
+        encoders = subprocess.run(
+            [ffmpeg, "-hide_banner", "-encoders"],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        encoder_text = (encoders.stdout or "") + (encoders.stderr or "")
+        nvenc_available = "h264_nvenc" in encoder_text
+        print(
+            "[merge] FFmpeg h264_nvenc: {}".format(
+                "available" if nvenc_available else "unavailable"
+            ),
+            flush=True,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        print("[merge] FFmpeg NVENC check failed: {}".format(exc), flush=True)
+
+    if nvenc_available and (nvidia_available or mode == "gpu"):
+        print("[merge] encoder selected: GPU/NVENC (h264_nvenc)", flush=True)
+        return "gpu"
+
+    if mode == "gpu":
+        raise RuntimeError(
+            "MERGE_ENCODER=gpu was requested, but NVIDIA/NVENC is unavailable."
+        )
+
+    print("[merge] encoder selected: CPU/libx264", flush=True)
+    return "cpu"
+
+
 def merge_videos_sync(input_paths, output_path):
     ffmpeg = shutil.which("ffmpeg")
     if not ffmpeg:
         raise RuntimeError("ffmpeg is not installed in this runtime.")
 
-    # The concat filter is used instead of stream-copy so videos with
-    # different codecs/resolutions/time bases can still be normalized into
-    # one MP4. FFmpeg documents this as the re-encoding concat approach.
+    encoder = detect_merge_encoder(ffmpeg)
+
+    # The concat filter normalizes different inputs into one MP4 before encoding.
     inputs = []
     for path in input_paths:
         inputs.extend(["-i", str(path)])
@@ -373,20 +433,65 @@ def merge_videos_sync(input_paths, output_path):
         "-filter_complex", "".join(filter_parts),
         "-map", "[outv]",
         "-map", "[outa]",
-        "-c:v", "libx264",
-        "-preset", os.getenv("MERGE_PRESET", "veryfast"),
-        "-crf", os.getenv("MERGE_CRF", "23"),
+    ]
+
+    if encoder == "gpu":
+        command += [
+            "-c:v", "h264_nvenc",
+            "-preset", os.getenv("MERGE_NVENC_PRESET", "p4"),
+            "-cq", os.getenv("MERGE_NVENC_CQ", "23"),
+        ]
+    else:
+        command += [
+            "-c:v", "libx264",
+            "-preset", os.getenv("MERGE_PRESET", "veryfast"),
+            "-crf", os.getenv("MERGE_CRF", "23"),
+        ]
+
+    command += [
         "-c:a", "aac",
         "-b:a", os.getenv("MERGE_AUDIO_BITRATE", "128k"),
         "-movflags", "+faststart",
         str(output_path),
     ]
 
+    print(
+        "[merge] starting FFmpeg with {} encoder".format(
+            "GPU/NVENC" if encoder == "gpu" else "CPU/libx264"
+        ),
+        flush=True,
+    )
     result = subprocess.run(
         command,
         capture_output=True,
         text=True,
     )
+
+    if result.returncode != 0 and encoder == "gpu" and os.getenv("MERGE_ENCODER", "auto").strip().lower() == "auto":
+        print("[merge] NVENC failed; retrying with CPU/libx264", flush=True)
+        cpu_command = [
+            ffmpeg,
+            "-hide_banner",
+            "-loglevel", "error",
+            "-y",
+            *inputs,
+            "-filter_complex", "".join(filter_parts),
+            "-map", "[outv]",
+            "-map", "[outa]",
+            "-c:v", "libx264",
+            "-preset", os.getenv("MERGE_PRESET", "veryfast"),
+            "-crf", os.getenv("MERGE_CRF", "23"),
+            "-c:a", "aac",
+            "-b:a", os.getenv("MERGE_AUDIO_BITRATE", "128k"),
+            "-movflags", "+faststart",
+            str(output_path),
+        ]
+        result = subprocess.run(
+            cpu_command,
+            capture_output=True,
+            text=True,
+        )
+
     if result.returncode != 0:
         raise RuntimeError(
             "ffmpeg merge failed: {}".format(
