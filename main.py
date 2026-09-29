@@ -3,9 +3,7 @@ import html
 import json
 import os
 import re
-import shutil
 import sqlite3
-import subprocess
 import threading
 import time
 from pathlib import Path
@@ -52,16 +50,6 @@ AUTO_STOP = threading.Event()
 CRAWL_STATES = {}
 DOWNLOAD_STATES = {}
 CHANNEL_SETUP_USERS = set()
-
-# Per-chat video merge sessions. Files remain on disk until the session is
-# merged or cancelled. This is intentionally separate from the GoFile upload
-# lifecycle so normal uploads can still clean up their temporary files.
-MERGE_SESSIONS = {}
-MERGE_LOCK = asyncio.Lock()
-MAX_MERGE_VIDEOS = max(int(os.getenv("MAX_MERGE_VIDEOS", "100")), 2)
-MAX_MERGE_FILE_BYTES = max(
-    int(os.getenv("MAX_MERGE_FILE_GB", "20")), 1
-) * 1024 * 1024 * 1024
 
 app = Client(
     "whbot",
@@ -290,558 +278,6 @@ def mark_video_uploaded(post_id, message_id):
 
 
 
-def merge_keyboard():
-    return InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("➕ Add More Video", callback_data="merge:add"),
-            InlineKeyboardButton("🔗 Merge Videos", callback_data="merge:run"),
-        ],
-        [
-            InlineKeyboardButton("❌ Cancel Merge", callback_data="merge:cancel"),
-        ],
-    ])
-
-
-def merge_status_text(session):
-    files = session.get("files") or []
-    total_bytes = sum(
-        path.stat().st_size for path in files
-        if path.exists()
-    )
-    return (
-        "🎞️ <b>Video Merge Queue</b>\n\n"
-        f"📹 Videos: <b>{len(files)}</b>\n"
-        f"💾 Size: <b>{format_size(total_bytes)}</b>\n\n"
-        "Send another video to add it to the queue, or press "
-        "<b>Merge Videos</b> when you are finished."
-    )
-
-
-def _is_video_document(message):
-    document = getattr(message, "document", None)
-    if not document:
-        return False
-    mime = (getattr(document, "mime_type", None) or "").lower()
-    name = (getattr(document, "file_name", None) or "").lower()
-    return mime.startswith("video/") or name.endswith(
-        (".mp4", ".mkv", ".webm", ".mov", ".avi", ".m4v", ".ts")
-    )
-
-
-def _merge_safe_name(value):
-    return "".join(
-        char if char.isalnum() or char in "._-" else "_"
-        for char in value
-    )[:80] or "merged"
-
-
-def merge_progress_factory(status, total_duration):
-    state = {"last": 0.0, "last_percent": -1.0}
-
-    def progress(out_seconds, speed):
-        if status is None:
-            return
-        now = time.monotonic()
-        percent = (
-            min(max(out_seconds * 100.0 / total_duration, 0.0), 100.0)
-            if total_duration > 0 else 0.0
-        )
-        if percent < 100.0 and now - state["last"] < PROGRESS_UPDATE_INTERVAL:
-            return
-        state["last"] = now
-        state["last_percent"] = percent
-        bar = progress_bar(percent)
-        text = (
-            "🎞️ <b>Encoding merged video</b>\n"
-            f"<code>[{bar}] {percent:5.1f}%</code>\n"
-            f"🎮 <b>Encoder:</b> {html.escape(speed.get('encoder', 'NVENC/CPU'))}\n"
-            f"⏱ <b>{format_time(out_seconds)}</b> / "
-            f"<b>{format_time(total_duration)}</b>\n"
-            f"⚡ <b>{html.escape(speed.get('speed', '?'))}</b>"
-        )
-        asyncio.run_coroutine_threadsafe(safe_edit(status, text), app.loop)
-
-    return progress
-
-
-def _ffmpeg_input_duration(ffmpeg, path):
-    ffprobe = shutil.which("ffprobe")
-    if not ffprobe:
-        return 0.0
-    try:
-        result = subprocess.run(
-            [
-                ffprobe,
-                "-v", "error",
-                "-show_entries", "format=duration",
-                "-of", "default=noprint_wrappers=1:nokey=1",
-                str(path),
-            ],
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-        return float((result.stdout or "").strip())
-    except (OSError, ValueError, subprocess.SubprocessError):
-        return 0.0
-
-def _ffmpeg_video_dimensions(path):
-    """Return the source video's width and height, or (0, 0) if unavailable."""
-    ffprobe = shutil.which("ffprobe")
-    if not ffprobe:
-        return 0, 0
-    try:
-        result = subprocess.run(
-            [
-                ffprobe,
-                "-v", "error",
-                "-select_streams", "v:0",
-                "-show_entries", "stream=width,height",
-                "-of", "csv=p=0:s=x",
-                str(path),
-            ],
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-        raw = (result.stdout or "").strip().splitlines()
-        if not raw:
-            return 0, 0
-        width, height = raw[0].strip().split("x", 1)
-        return int(width), int(height)
-    except (OSError, ValueError, subprocess.SubprocessError):
-        return 0, 0
-
-
-def detect_merge_encoder(ffmpeg):
-    """Select NVENC when explicitly requested or auto-detected, else CPU."""
-    mode = os.getenv("MERGE_ENCODER", "auto").strip().lower()
-    if mode not in {"auto", "gpu", "cpu"}:
-        print("[merge] invalid MERGE_ENCODER={!r}; using auto".format(mode), flush=True)
-        mode = "auto"
-
-    if mode == "cpu":
-        print("[merge] encoder selected: CPU/libx264 (MERGE_ENCODER=cpu)", flush=True)
-        return "cpu"
-
-    nvidia_available = False
-    try:
-        probe = subprocess.run(
-            ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-        gpu_name = (probe.stdout or "").strip().splitlines()[0] if probe.returncode == 0 else ""
-        nvidia_available = bool(gpu_name)
-        if gpu_name:
-            print("[merge] NVIDIA GPU detected: {}".format(gpu_name), flush=True)
-        else:
-            print("[merge] NVIDIA GPU unavailable", flush=True)
-    except (OSError, subprocess.SubprocessError) as exc:
-        print("[merge] NVIDIA GPU check failed: {}".format(exc), flush=True)
-
-    nvenc_available = False
-    try:
-        encoders = subprocess.run(
-            [ffmpeg, "-hide_banner", "-encoders"],
-            capture_output=True,
-            text=True,
-            timeout=15,
-        )
-        encoder_text = (encoders.stdout or "") + (encoders.stderr or "")
-        nvenc_available = "h264_nvenc" in encoder_text
-        print(
-            "[merge] FFmpeg h264_nvenc: {}".format(
-                "available" if nvenc_available else "unavailable"
-            ),
-            flush=True,
-        )
-    except (OSError, subprocess.SubprocessError) as exc:
-        print("[merge] FFmpeg NVENC check failed: {}".format(exc), flush=True)
-
-    if nvenc_available and (nvidia_available or mode == "gpu"):
-        print("[merge] encoder selected: GPU/NVENC (h264_nvenc)", flush=True)
-        return "gpu"
-
-    if mode == "gpu":
-        raise RuntimeError(
-            "MERGE_ENCODER=gpu was requested, but NVIDIA/NVENC is unavailable."
-        )
-
-    print("[merge] encoder selected: CPU/libx264", flush=True)
-    return "cpu"
-
-
-def merge_videos_sync(input_paths, output_path, progress_callback=None):
-    ffmpeg = shutil.which("ffmpeg")
-    if not ffmpeg:
-        raise RuntimeError("ffmpeg is not installed in this runtime.")
-
-    encoder = detect_merge_encoder(ffmpeg)
-    total_duration = sum(_ffmpeg_input_duration(ffmpeg, path) for path in input_paths)
-
-    # The concat filter requires every video input to have identical
-    # width/height/SAR. Pick a common even canvas based on the largest
-    # source dimensions, then scale+pad every input into that canvas while
-    # preserving aspect ratio.
-    dimensions = [_ffmpeg_video_dimensions(path) for path in input_paths]
-    valid_dimensions = [(w, h) for w, h in dimensions if w > 0 and h > 0]
-    if not valid_dimensions:
-        raise RuntimeError("ffprobe could not determine the input video dimensions.")
-
-    target_width = max(w for w, _ in valid_dimensions)
-    target_height = max(h for _, h in valid_dimensions)
-    target_width = max(target_width - (target_width % 2), 2)
-    target_height = max(target_height - (target_height % 2), 2)
-
-    print(
-        "[merge] common video canvas: {}x{} from inputs={}".format(
-            target_width,
-            target_height,
-            dimensions,
-        ),
-        flush=True,
-    )
-
-    inputs = []
-    for path in input_paths:
-        inputs.extend(["-i", str(path)])
-
-    filter_parts = []
-    for index in range(len(input_paths)):
-        filter_parts.append(
-            "[{0}:v:0]scale={1}:{2}:force_original_aspect_ratio=decrease,"
-            "pad={1}:{2}:(ow-iw)/2:(oh-ih)/2,"
-            "setsar=1,fps=30,format=yuv420p[v{0}];"
-            "[{0}:a:0]aresample=async=1:first_pts=0[a{0}];".format(
-                index, target_width, target_height
-            )
-        )
-
-    concat_inputs = "".join(
-        "[v{0}][a{0}]".format(index)
-        for index in range(len(input_paths))
-    )
-    filter_parts.append(
-        concat_inputs
-        + "concat=n={}:v=1:a=1[outv][outa]".format(len(input_paths))
-    )
-
-    command = [
-        ffmpeg,
-        "-hide_banner",
-        "-loglevel", "error",
-        "-y",
-        *inputs,
-        "-filter_complex", "".join(filter_parts),
-        "-map", "[outv]",
-        "-map", "[outa]",
-    ]
-
-    if encoder == "gpu":
-        command += [
-            "-c:v", "h264_nvenc",
-            "-preset", os.getenv("MERGE_NVENC_PRESET", "p4"),
-            "-cq", os.getenv("MERGE_NVENC_CQ", "23"),
-        ]
-    else:
-        command += [
-            "-c:v", "libx264",
-            "-preset", os.getenv("MERGE_PRESET", "veryfast"),
-            "-crf", os.getenv("MERGE_CRF", "23"),
-        ]
-
-    command += [
-        "-c:a", "aac",
-        "-b:a", os.getenv("MERGE_AUDIO_BITRATE", "128k"),
-        "-movflags", "+faststart",
-        str(output_path),
-    ]
-
-    print(
-        "[merge] starting FFmpeg with {} encoder".format(
-            "GPU/NVENC" if encoder == "gpu" else "CPU/libx264"
-        ),
-        flush=True,
-    )
-
-    # Ask FFmpeg for machine-readable progress so Telegram can edit one
-    # status message instead of sending a new message for every update.
-    command += ["-progress", "pipe:1", "-nostats"]
-    process = subprocess.Popen(
-        command,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        bufsize=1,
-    )
-    progress_data = {}
-    while True:
-        line = process.stdout.readline() if process.stdout else ""
-        if not line:
-            break
-        line = line.strip()
-        if "=" in line:
-            key, value = line.split("=", 1)
-            progress_data[key] = value
-            if key == "progress":
-                try:
-                    out_seconds = float(progress_data.get("out_time_ms", "0")) / 1000000.0
-                except ValueError:
-                    out_seconds = 0.0
-                if progress_callback:
-                    progress_callback(
-                        out_seconds,
-                        {
-                            "speed": progress_data.get("speed", "?"),
-                            "encoder": "NVIDIA NVENC" if encoder == "gpu" else "CPU/libx264",
-                        },
-                    )
-                progress_data = {}
-    stderr = process.stderr.read() if process.stderr else ""
-    process.wait()
-    result = subprocess.CompletedProcess(
-        command,
-        process.returncode,
-        stdout="",
-        stderr=stderr,
-    )
-
-    if result.returncode != 0 and encoder == "gpu" and os.getenv("MERGE_ENCODER", "auto").strip().lower() == "auto":
-        print("[merge] NVENC failed; retrying with CPU/libx264", flush=True)
-        cpu_command = [
-            ffmpeg,
-            "-hide_banner",
-            "-loglevel", "error",
-            "-y",
-            *inputs,
-            "-filter_complex", "".join(filter_parts),
-            "-map", "[outv]",
-            "-map", "[outa]",
-            "-c:v", "libx264",
-            "-preset", os.getenv("MERGE_PRESET", "veryfast"),
-            "-crf", os.getenv("MERGE_CRF", "23"),
-            "-c:a", "aac",
-            "-b:a", os.getenv("MERGE_AUDIO_BITRATE", "128k"),
-            "-movflags", "+faststart",
-            str(output_path),
-        ]
-        result = subprocess.run(
-            cpu_command,
-            capture_output=True,
-            text=True,
-        )
-
-    if result.returncode != 0:
-        raise RuntimeError(
-            "ffmpeg merge failed: {}".format(
-                (result.stderr or "unknown ffmpeg error")[-2000:]
-            )
-        )
-    if not output_path.is_file() or output_path.stat().st_size == 0:
-        raise RuntimeError("ffmpeg finished without creating the merged video.")
-    return output_path
-
-
-async def start_merge_session(message, existing_files=None):
-    files = [
-        Path(path) for path in (existing_files or [])
-        if Path(path).is_file()
-    ]
-    MERGE_SESSIONS[message.chat.id] = {
-        "files": files,
-        "status_message_id": None,
-    }
-    text = merge_status_text(MERGE_SESSIONS[message.chat.id])
-    sent = await message.reply_text(text, reply_markup=merge_keyboard())
-    MERGE_SESSIONS[message.chat.id]["status_message_id"] = sent.id
-    return sent
-
-
-async def receive_merge_video(message):
-    session = MERGE_SESSIONS.get(message.chat.id)
-    if not session:
-        return False
-
-    if len(session["files"]) >= MAX_MERGE_VIDEOS:
-        await message.reply_text(
-            "❌ Merge limit reached: <b>{}</b> videos.".format(MAX_MERGE_VIDEOS)
-        )
-        return True
-
-    media = message.video or message.document
-    if not message.video and not _is_video_document(message):
-        return False
-
-    file_name = (
-        getattr(media, "file_name", None)
-        or getattr(message.video, "file_name", None)
-        or "video.mp4"
-    )
-    safe = _merge_safe_name(Path(file_name).stem)
-    destination = (
-        DOWNLOAD_DIR
-        / "merge"
-        / str(message.chat.id)
-        / "{}_{:03d}.mp4".format(safe, len(session["files"]) + 1)
-    )
-    destination.parent.mkdir(parents=True, exist_ok=True)
-
-    existing_bytes = sum(
-        path.stat().st_size for path in session["files"] if path.exists()
-    )
-    media_size = int(getattr(media, "file_size", 0) or 0)
-    if existing_bytes + media_size > MAX_MERGE_FILE_BYTES:
-        await message.reply_text(
-            "❌ Merge storage limit reached: <b>{}</b>.".format(
-                format_size(MAX_MERGE_FILE_BYTES)
-            )
-        )
-        return True
-
-    # Reuse the existing merge status message. Do not create a new
-    # Telegram message for every video or every progress stage.
-    status = None
-    status_message_id = session.get("status_message_id")
-    if status_message_id:
-        try:
-            status = await app.get_messages(message.chat.id, status_message_id)
-        except Exception as exc:
-            print("[merge] could not reuse status message: {}".format(exc), flush=True)
-
-    if status is None:
-        status = await message.reply_text(merge_status_text(session))
-        session["status_message_id"] = status.id
-
-    try:
-        await safe_edit(
-            status,
-            "⬇️ <b>Saving video {}/{}</b> to the merge queue...".format(
-                len(session["files"]) + 1, MAX_MERGE_VIDEOS
-            ),
-        )
-        downloaded = await message.download(file_name=str(destination))
-        path = Path(downloaded or destination)
-        if not path.is_file():
-            raise RuntimeError("Telegram download completed but the file was not found.")
-
-        session["files"].append(path)
-        await safe_edit(status, merge_status_text(session))
-    except Exception as exc:
-        destination.unlink(missing_ok=True)
-        await safe_edit(
-            status,
-            "❌ Could not save video: " + html.escape(str(exc)),
-        )
-    return True
-
-
-async def run_merge_session(chat_id, status):
-    session = MERGE_SESSIONS.get(chat_id)
-    if not session:
-        await safe_edit(status, "❌ No active merge session.")
-        return
-
-    files = [path for path in session["files"] if path.is_file()]
-    if len(files) < 2:
-        await safe_edit(
-            status,
-            "⚠️ Send at least <b>2 videos</b> before merging.",
-            )
-        return
-
-    if MERGE_LOCK.locked():
-        await safe_edit(status, "⏳ Another merge is already running.")
-        return
-
-    await MERGE_LOCK.acquire()
-    output = (
-        DOWNLOAD_DIR
-        / "merge"
-        / str(chat_id)
-        / "merged-{}.mp4".format(int(time.time()))
-    )
-    try:
-        await safe_edit(
-            status,
-            "⚙️ <b>Merging {}</b> videos with FFmpeg...\n"
-            "This re-encodes the videos so different inputs can be joined.".format(
-                len(files)
-            ),
-        )
-        total_duration = 0.0
-        ffmpeg_path = shutil.which("ffmpeg")
-        for path in files:
-            total_duration += await asyncio.to_thread(
-                _ffmpeg_input_duration,
-                ffmpeg_path,
-                path,
-            )
-        encoder_label = (
-            "NVIDIA NVENC" if os.getenv("MERGE_ENCODER", "auto").strip().lower() != "cpu"
-            else "CPU/libx264"
-        )
-        await safe_edit(
-            status,
-            "⚙️ <b>Preparing merge</b>\n"
-            f"📹 Parts: <b>{len(files)}</b>\n"
-            f"⏱ Total source duration: <b>{format_time(total_duration)}</b>\n"
-            f"🎮 Encoder mode: <b>{encoder_label}</b>",
-        )
-        await asyncio.to_thread(
-            merge_videos_sync,
-            files,
-            output,
-            merge_progress_factory(status, total_duration),
-        )
-
-        metadata = await asyncio.to_thread(video_metadata, output)
-        size = output.stat().st_size
-        await safe_edit(
-            status,
-            "☁️ Uploading merged video to GoFile...",
-        )
-        uploader = GofileUploader()
-        started = time.monotonic()
-        gofile_url = await asyncio.to_thread(
-            uploader.upload,
-            output,
-            gofile_progress_factory(status),
-        )
-        elapsed = max(time.monotonic() - started, 0.001)
-
-        caption = (
-            "🎞️ <b>Merged Video</b>\n"
-            f"📹 Parts: <b>{len(files)}</b>\n"
-            f"💾 Size: <b>{format_size(size)}</b>\n"
-            f"⏱ Duration: <b>{format_duration(metadata.get('duration'))}</b>\n"
-            f"⚡ GoFile upload: <b>{size / elapsed / 1048576:.2f} MB/s</b>\n\n"
-            f'☁️ <a href="{html.escape(gofile_url, quote=True)}">Download merged video</a>'
-        )
-        markup = InlineKeyboardMarkup(
-            [[InlineKeyboardButton("⬇️ Download from GoFile", url=gofile_url)]]
-        )
-        # Reuse the single status message for the final result. No separate
-        # completion notification is sent.
-        await safe_edit(status, caption, reply_markup=markup)
-
-        # Only clean the source files after the final merge/upload succeeds.
-        for path in files:
-            path.unlink(missing_ok=True)
-        output.unlink(missing_ok=True)
-        MERGE_SESSIONS.pop(chat_id, None)
-    except Exception as exc:
-        await safe_edit(
-            status,
-            "❌ <b>Merge failed</b>\n" + html.escape(str(exc)),
-        )
-        # Keep the source videos so the user can retry without uploading them again.
-        output.unlink(missing_ok=True)
-    finally:
-        MERGE_LOCK.release()
-
-
 def episode_keyboard(ep):
     rows = []
     navigation = ep["navigation"]
@@ -950,6 +386,8 @@ async def download_and_send(
     post_id=None,
     series_name=None,
     series_total=None,
+    series_episode_index=None,
+    series_completed=0,
     keep_local=False,
     upload_to_gofile=True,
     output_path=None,
@@ -982,9 +420,19 @@ async def download_and_send(
     retained_output = False
 
     if status:
-        await status.edit_text(
-            f"⬇️ Downloading <b>{html.escape(label)}</b> — "
-            f"{html.escape(ep['title'])}"
+        await safe_edit(
+            status,
+            series_transfer_text(
+                series_name or ep.get("title") or "Video",
+                "download",
+                series_episode_index or 1,
+                series_total or 1,
+                series_completed,
+                0,
+                0,
+                0,
+                label,
+            ),
         )
 
     try:
@@ -992,7 +440,13 @@ async def download_and_send(
             provider.download,
             source["url"],
             output,
-            download_progress_factory(status) if status else None,
+            download_progress_factory(
+                status,
+                series_name=series_name or ep.get("title") or "Video",
+                episode_index=series_episode_index or 1,
+                episode_total=series_total or 1,
+                completed_count=series_completed,
+            ) if status else None,
             ep.get("page_url"),
         )
 
@@ -1011,7 +465,20 @@ async def download_and_send(
             return {"message": None, "path": output, "metadata": metadata}
 
         if status:
-            await status.edit_text("☁️ Uploading video to GoFile...")
+            await safe_edit(
+                status,
+                series_transfer_text(
+                    series_name or ep.get("title") or "Video",
+                    "upload",
+                    series_episode_index or 1,
+                    series_total or 1,
+                    series_completed,
+                    0,
+                    0,
+                    0,
+                    label,
+                ),
+            )
 
         # Guest upload: no API token is supplied. GoFile creates a temporary
         # guest account and returns a public downloadPage for this file.
@@ -1020,7 +487,13 @@ async def download_and_send(
         gofile_url = await asyncio.to_thread(
             uploader.upload,
             output,
-            gofile_progress_factory(status),
+            gofile_progress_factory(
+                status,
+                series_name=series_name or ep.get("title") or "Video",
+                episode_index=series_episode_index or 1,
+                episode_total=series_total or 1,
+                completed_count=series_completed,
+            ),
         )
         elapsed = max(time.monotonic() - started, 0.001)
         print(
@@ -1056,9 +529,6 @@ async def download_and_send(
         markup = InlineKeyboardMarkup([
             [InlineKeyboardButton("☁️ Open GoFile", url=gofile_url)]
         ])
-
-        if status:
-            await status.edit_text("📨 Sending GoFile link to Telegram...")
 
         sent = None
         if thumb_path := (await asyncio.to_thread(
@@ -1507,23 +977,6 @@ async def verify_channel_command(_, message):
 
 
 
-@app.on_message(filters.command("merge"))
-async def merge_command(_, message):
-    print("[command] /merge chat_id={}".format(message.chat.id), flush=True)
-    existing = MERGE_SESSIONS.get(message.chat.id, {}).get("files", [])
-    await start_merge_session(message, existing_files=existing)
-
-
-@app.on_message((filters.video | filters.document))
-async def merge_media(_, message):
-    # A video sent while a merge session is active is added to that session.
-    # Documents are accepted only when their MIME type or extension identifies
-    # them as a video.
-    if message.chat.id not in MERGE_SESSIONS:
-        return
-    await receive_merge_video(message)
-
-
 @app.on_message(filters.command("start"))
 async def start(_, message):
     await message.reply_text(
@@ -1534,7 +987,7 @@ async def start(_, message):
         "/stats - catalog statistics\n"
         "/crawl - crawl series catalog\n"
         "/download - download a complete series to the download channel\n"
-        "/merge - collect multiple videos and merge them into one\n"
+
         "/publish - publish catalog metadata\n"
         "/auto - sequentially upload pending episodes\n"
         "/setchannel - configure the download channel"
@@ -1791,11 +1244,6 @@ async def show_series_preview(message, series, episode_items):
                 "⬇️ Download All Episodes",
                 callback_data="sd:" + enc(series["series_url"]),
             )
-        ], [
-            InlineKeyboardButton(
-                "🎞️ Download & Merge All",
-                callback_data="sm:" + enc(series["series_url"]),
-            )
         ]]
     )
 
@@ -1873,8 +1321,6 @@ async def download_series(
     raise_on_error=False,
     acquire_lock=True,
     fallback_chat_id=None,
-    merge_chat_id=None,
-    merge_series=False,
 ):
 
     upload_chat = DOWNLOAD_CHANNEL_ID
@@ -1916,19 +1362,12 @@ async def download_series(
     if status is None:
         if message is None:
             raise ProviderError("A status message is required for background downloads.")
-        status = await message.reply_text("🔎 Resolving series and episode list...")
+        status = await message.reply_text("🎬 <b>Preparing download...</b>")
 
     try:
         series, episode_items = await resolve_series(series_url)
         total = series.get("total_episodes") or len(episode_items)
-
-        await safe_edit(
-            status,
-            "📚 <b>{}</b>\nEpisodes found: <b>{}</b>\n"
-            "🔗 Resolving video sources only when each episode is downloaded...".format(
-                html.escape(series["name"]), len(episode_items)
-            ),
-        )
+        await safe_edit(status, "🎬 <b>{}</b>".format(html.escape(series["name"])))
 
         def episode_number(item):
             m = re.search(r"episode[-\s]+(\d+)", item["page_url"], re.I)
@@ -1970,35 +1409,13 @@ async def download_series(
             completed = False
             for source in sources:
                 label = str(source.get("label") or "Unknown")
-                await safe_edit(
-                    status,
-                    "⬇️ <b>Episode {}/{}</b> — resolving/downloading <b>{}</b>...".format(
-                        index, total, html.escape(label)
-                    ),
-                )
                 print(
-                    "[series download] trying episode {} quality={} merge_mode={}".format(
-                        index, label, merge_series
+                    "[series download] trying episode {} quality={}".format(
+                        index, label
                     ),
                     flush=True,
                 )
                 try:
-                    merge_output = None
-                    if merge_series:
-                        safe_episode = "".join(
-                            char if char.isalnum() or char in "._-" else "_"
-                            for char in ep["title"]
-                        )[:70] or "episode"
-                        merge_output = (
-                            DOWNLOAD_DIR
-                            / "merge"
-                            / str(fallback_chat_id or (message.chat.id if message else 0))
-                            / "{}_{:03d}-{}-{}.mp4".format(
-                                safe_episode, index, label, int(time.time())
-                            )
-                        )
-                        merge_output.parent.mkdir(parents=True, exist_ok=True)
-
                     result = await download_and_send(
                         ep,
                         upload_chat,
@@ -2006,18 +1423,11 @@ async def download_series(
                         status=status,
                         series_name=series["name"],
                         series_total=total,
-                        keep_local=bool(merge_chat_id or merge_series),
-                        upload_to_gofile=not merge_series,
-                        output_path=merge_output,
+                        series_episode_index=index,
+                        series_completed=index - 1,
                         send_telegram=False,
                     )
-                    if merge_series and result.get("path"):
-                        session = MERGE_SESSIONS.setdefault(
-                            fallback_chat_id or (message.chat.id if message else 0),
-                            {"files": [], "status_message_id": None},
-                        )
-                        session["files"].append(Path(result["path"]))
-                    elif not merge_series and result.get("gofile_url"):
+                    if result.get("gofile_url"):
                         series_episode_results.append({
                             "index": index,
                             "episode": result.get("episode") or ep.get("episode") or index,
@@ -2042,51 +1452,19 @@ async def download_series(
                     )
                 )
 
-        if not merge_series:
-            await safe_edit(
-                status,
-                "🎉 <b>All {} episodes uploaded to GoFile.</b>\n"
-                "📋 Sending the episode menu...".format(len(series_episode_results)),
-            )
-            await send_series_episode_menu(upload_chat, series, series_episode_results)
-        # The existing status message is reused throughout the operation;
-        # no separate completion notification is sent.
+        await safe_edit(
+            status,
+            "🎬 <b>{}</b>\n\n"
+            "📥 <b>DOWNLOAD</b>\n"
+            "All episodes downloaded.\n\n"
+            "📊 <b>Progress</b>\n"
+            "{}".format(
+                html.escape(series["name"]),
+                "  ".join("{} ✅".format(i) for i in range(1, total + 1)),
+            ),
+        )
+        await send_series_episode_menu(upload_chat, series, series_episode_results)
 
-        if merge_series:
-            chat_id = fallback_chat_id or (message.chat.id if message else None)
-            session = MERGE_SESSIONS.get(chat_id)
-            if not session or len(session.get("files") or []) != total:
-                raise ProviderError(
-                    "Not all episodes were downloaded, so the complete series cannot be merged."
-                )
-            session["files"] = [
-                Path(path) for path in session["files"]
-                if Path(path).is_file()
-            ]
-            if len(session["files"]) != total:
-                raise ProviderError(
-                    "One or more downloaded episode files are missing from disk."
-                )
-            await safe_edit(
-                status,
-                "🎞️ <b>Encoding merged video...</b>\n"
-                f"📹 Parts: <b>{total}</b>\n"
-                "Preparing FFmpeg.",
-            )
-            await run_merge_session(chat_id, status)
-        elif merge_chat_id:
-            session = MERGE_SESSIONS.get(merge_chat_id)
-            if session and session.get("files"):
-                session["files"] = [
-                    Path(path) for path in session["files"]
-                    if Path(path).is_file()
-                ]
-                merge_message = await app.send_message(
-                    merge_chat_id,
-                    merge_status_text(session),
-                    reply_markup=merge_keyboard(),
-                )
-                session["status_message_id"] = merge_message.id
     except Exception as exc:
         print(
             "[series download] FAILED: {}: {}".format(type(exc).__name__, exc),
@@ -2262,7 +1640,54 @@ async def upload_progress(current, total, status, started):
     )
 
 
-def gofile_progress_factory(status):
+def series_transfer_text(
+    title,
+    stage,
+    episode_index,
+    episode_total,
+    completed_count,
+    current,
+    total,
+    started,
+    quality=None,
+):
+    elapsed = max(time.monotonic() - started, 0.001) if started else 0.001
+    speed = current / elapsed if current else 0.0
+    eta = (total - current) / speed if total and speed > 0 else 0.0
+    percent = current * 100 / total if total else 0.0
+
+    queue = []
+    for number in range(1, episode_total + 1):
+        if number <= completed_count:
+            icon = "✅"
+        elif number == episode_index:
+            icon = "🔄"
+        else:
+            icon = "⏳"
+        queue.append("{} {}".format(number, icon))
+
+    quality_line = f"\n🎥 {html.escape(quality)}" if quality else ""
+    eta_text = format_time(eta) if total and speed > 0 else "--"
+    speed_text = format_size(speed) + "/s" if speed > 0 else "0 B/s"
+
+    return (
+        f"🎬 <b>{html.escape(title)}</b>\n\n"
+        f"{'📥' if stage == 'download' else '☁️'} <b>{'DOWNLOAD' if stage == 'download' else 'UPLOAD'}</b>\n"
+        f"Episode <b>{episode_index} / {episode_total}</b>{quality_line}\n"
+        f"<code>[{progress_bar(percent)}] {percent:5.1f}%</code>\n"
+        f"⚡ {speed_text}  •  ⏱ ETA {eta_text}\n\n"
+        f"📊 <b>Progress</b>\n"
+        f"{'  '.join(queue)}"
+    )
+
+
+def gofile_progress_factory(
+    status,
+    series_name=None,
+    episode_index=1,
+    episode_total=1,
+    completed_count=0,
+):
     state = {"last": 0.0}
 
     def progress(current, total, started):
@@ -2275,7 +1700,16 @@ def gofile_progress_factory(status):
         asyncio.run_coroutine_threadsafe(
             safe_edit(
                 status,
-                progress_text("☁️ <b>Uploading to GoFile</b>", current, total, started),
+                series_transfer_text(
+                    series_name or "Video",
+                    "upload",
+                    episode_index,
+                    episode_total,
+                    completed_count,
+                    current,
+                    total,
+                    started,
+                ),
             ),
             app.loop,
         )
@@ -2283,7 +1717,13 @@ def gofile_progress_factory(status):
     return progress
 
 
-def download_progress_factory(status):
+def download_progress_factory(
+    status,
+    series_name=None,
+    episode_index=1,
+    episode_total=1,
+    completed_count=0,
+):
     state = {"last": 0.0}
 
     def progress(current, total, started):
@@ -2296,7 +1736,16 @@ def download_progress_factory(status):
         asyncio.run_coroutine_threadsafe(
             safe_edit(
                 status,
-                progress_text("⬇️ Downloading...", current, total, started),
+                series_transfer_text(
+                    series_name or "Video",
+                    "download",
+                    episode_index,
+                    episode_total,
+                    completed_count,
+                    current,
+                    total,
+                    started,
+                ),
             ),
             app.loop,
         )
@@ -2420,25 +1869,6 @@ async def callback(_, query):
     await query.answer()
 
     try:
-        if query.data == "merge:add":
-            existing = MERGE_SESSIONS.get(query.message.chat.id, {}).get("files", [])
-            await start_merge_session(query.message, existing_files=existing)
-            return
-
-        if query.data == "merge:cancel":
-            session = MERGE_SESSIONS.pop(query.message.chat.id, None)
-            if session:
-                for path in session.get("files", []):
-                    Path(path).unlink(missing_ok=True)
-            await query.message.edit_text("❌ <b>Merge session cancelled.</b>")
-            return
-
-        if query.data == "merge:run":
-            status = query.message
-            # Button callback is attached to the queue message itself.
-            await run_merge_session(query.message.chat.id, status)
-            return
-
         if query.data.startswith("sd:"):
             series_url = dec(query.data[3:])
             if AUTO_LOCK.locked():
@@ -2447,10 +1877,7 @@ async def callback(_, query):
                 )
                 return
 
-            status = await query.message.reply_text(
-                "🔎 <b>Starting series download...</b>\n"
-                "Each episode will be resolved individually."
-            )
+            status = await query.message.reply_text("🎬 <b>Preparing download...</b>")
             try:
                 await download_series(
                     message=None,
@@ -2464,38 +1891,6 @@ async def callback(_, query):
                 await safe_edit(
                     status,
                     "❌ Download failed: " + html.escape(str(exc)),
-                )
-            return
-
-        if query.data.startswith("sm:"):
-            series_url = dec(query.data[3:])
-            if AUTO_LOCK.locked():
-                await query.message.reply_text(
-                    "⏳ Another download/upload job is already running."
-                )
-                return
-
-            chat_id = query.message.chat.id
-            MERGE_SESSIONS.pop(chat_id, None)
-            status = await query.message.reply_text(
-                "🎞️ <b>Starting Download & Merge</b>\n"
-                "Episodes will be downloaded to disk first. GoFile upload happens only after the merge."
-            )
-            try:
-                await download_series(
-                    message=None,
-                    series_url=series_url,
-                    status=status,
-                    raise_on_error=False,
-                    acquire_lock=True,
-                    fallback_chat_id=chat_id,
-                    merge_chat_id=chat_id,
-                    merge_series=True,
-                )
-            except Exception as exc:
-                await safe_edit(
-                    status,
-                    "❌ Download & merge failed: " + html.escape(str(exc)),
                 )
             return
 
