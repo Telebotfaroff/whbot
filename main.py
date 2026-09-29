@@ -663,6 +663,7 @@ async def download_and_send(
     keep_local=False,
     upload_to_gofile=True,
     output_path=None,
+    send_telegram=True,
 ):
     print("[download] title={} preferred={} sources={}".format(
         ep.get("title"), preferred_quality, len(ep.get("sources") or [])
@@ -740,6 +741,18 @@ async def download_and_send(
 
         # Telegram delivery for an individual episode:
         # thumbnail -> episode title/details -> the public GoFile download link.
+        if not send_telegram:
+            retained_output = bool(keep_local)
+            return {
+                "message": None,
+                "path": output if retained_output else None,
+                "gofile_url": gofile_url,
+                "metadata": metadata,
+                "label": label,
+                "title": ep.get("title") or "Episode",
+                "episode": ep.get("episode") or "?",
+            }
+
         caption = (
             f"🎬 <b>{html.escape(ep['title'])}</b>\n"
             f"📺 <b>Episode:</b> {html.escape(str(ep.get('episode') or '?'))}\n"
@@ -1420,6 +1433,37 @@ async def show_series_preview(message, series, episode_items):
     )
 
 
+def series_episode_keyboard(episodes):
+    """Build one GoFile URL button per episode in series order."""
+    rows = []
+    for item in episodes:
+        number = str(item.get("episode") or item.get("index") or "?")
+        rows.append([
+            InlineKeyboardButton("▶️ Episode {}".format(number), url=item["gofile_url"])
+        ])
+    return InlineKeyboardMarkup(rows) if rows else None
+
+
+async def send_series_episode_menu(chat_id, series, episode_results):
+    ordered = sorted(
+        episode_results,
+        key=lambda item: (
+            int(item["episode"]) if str(item.get("episode", "")).isdigit() else 10**9,
+            int(item.get("index", 0)),
+        ),
+    )
+    text = (
+        f"🎬 <b>{html.escape(series['name'])}</b>\n"
+        f"📺 <b>{len(ordered)} Episodes</b>\n"
+        "━━━━━━━━━━━━━━"
+    )
+    markup = series_episode_keyboard(ordered)
+    if markup:
+        await app.send_message(chat_id, text, reply_markup=markup)
+    else:
+        await app.send_message(chat_id, text + "\n\n❌ No episode links were generated.")
+
+
 async def download_series(
     message,
     series_url,
@@ -1484,29 +1528,12 @@ async def download_series(
             ),
         )
 
-        header_text = (
-            f"🎬 <b>{html.escape(series['name'])}</b>\n"
-            f"📚 Total Episodes: <b>{total}</b>\n"
-            f'🔗 <a href="{html.escape(series["series_url"], quote=True)}">View Series</a>'
-        )
-        try:
-            if series.get("thumbnail"):
-                await app.send_photo(
-                    upload_chat,
-                    series["thumbnail"],
-                    caption=header_text,
-                )
-            else:
-                await app.send_message(upload_chat, header_text)
-        except Exception as exc:
-            # A header failure should not hide the actual episode download error.
-            print("[series header] {}".format(exc), flush=True)
-
         def episode_number(item):
             m = re.search(r"episode[-\s]+(\d+)", item["page_url"], re.I)
             return int(m.group(1)) if m else 10**9
 
         episode_items.sort(key=episode_number)
+        series_episode_results = []
 
         for index, item in enumerate(episode_items, 1):
             print(
@@ -1580,6 +1607,7 @@ async def download_series(
                         keep_local=bool(merge_chat_id or merge_series),
                         upload_to_gofile=not merge_series,
                         output_path=merge_output,
+                        send_telegram=False,
                     )
                     if merge_series and result.get("path"):
                         session = MERGE_SESSIONS.setdefault(
@@ -1587,6 +1615,13 @@ async def download_series(
                             {"files": [], "status_message_id": None},
                         )
                         session["files"].append(Path(result["path"]))
+                    elif not merge_series and result.get("gofile_url"):
+                        series_episode_results.append({
+                            "index": index,
+                            "episode": result.get("episode") or ep.get("episode") or index,
+                            "title": result.get("title") or ep.get("title") or f"Episode {index}",
+                            "gofile_url": result["gofile_url"],
+                        })
                     completed = True
                     break
                 except Exception as source_exc:
@@ -1614,12 +1649,21 @@ async def download_series(
                 ).format(index, total),
             )
 
-        await safe_edit(
-            status,
-            "🎉 <b>Series download complete</b>\n\n"
-            f"{html.escape(series['name'])}\n"
-            f"Episodes: <b>{total}</b>",
-        )
+        if not merge_series:
+            await safe_edit(
+                status,
+                "🎉 <b>All {} episodes uploaded to GoFile.</b>\n"
+                "📋 Sending the episode menu...".format(len(series_episode_results)),
+            )
+            await send_series_episode_menu(upload_chat, series, series_episode_results)
+        else:
+            await safe_edit(
+                status,
+                "🎉 <b>Series download complete</b>\n\n"
+                f"{html.escape(series['name'])}\n"
+                f"Episodes: <b>{total}</b>",
+            )
+
         if merge_series:
             chat_id = fallback_chat_id or (message.chat.id if message else None)
             session = MERGE_SESSIONS.get(chat_id)
