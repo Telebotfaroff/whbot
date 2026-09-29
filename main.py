@@ -2079,7 +2079,7 @@ async def episode(_, message):
 
 
 PROGRESS_BAR_LENGTH = 12
-PROGRESS_UPDATE_INTERVAL = max(float(os.getenv("DOWNLOAD_PROGRESS_INTERVAL", "5.0")), 2.0)
+PROGRESS_UPDATE_INTERVAL = max(float(os.getenv("DOWNLOAD_PROGRESS_INTERVAL", "2.5")), 2.5)
 
 
 def format_time(seconds):
