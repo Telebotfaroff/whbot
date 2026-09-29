@@ -1775,6 +1775,23 @@ async def send_series_episode_menu(chat_id, series, episode_results):
     )
     markup = series_episode_keyboard(ordered)
     if markup:
+        # Keep the existing single series menu, but use the series artwork as
+        # the visual thumbnail for the GoFile episode links.
+        thumbnail = series.get("thumbnail")
+        if thumbnail:
+            try:
+                await app.send_photo(
+                    chat_id,
+                    thumbnail,
+                    caption=text,
+                    reply_markup=markup,
+                )
+                return
+            except Exception as exc:
+                print(
+                    "[series menu] thumbnail failed: {}".format(exc),
+                    flush=True,
+                )
         await app.send_message(chat_id, text, reply_markup=markup)
     else:
         await app.send_message(chat_id, text + "\n\n❌ No episode links were generated.")
