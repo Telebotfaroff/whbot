@@ -1101,7 +1101,8 @@ async def verify_channel_command(_, message):
 @app.on_message(filters.command("merge"))
 async def merge_command(_, message):
     print("[command] /merge chat_id={}".format(message.chat.id), flush=True)
-    await start_merge_session(message)
+    existing = MERGE_SESSIONS.get(message.chat.id, {}).get("files", [])
+    await start_merge_session(message, existing_files=existing)
 
 
 @app.on_message((filters.video | filters.document))
