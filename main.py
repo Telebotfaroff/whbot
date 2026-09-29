@@ -2430,8 +2430,8 @@ async def main():
     load_download_channel_setting()
     print("[telegram] configured download channel: {}".format(DOWNLOAD_CHANNEL_ID or "NOT SET"), flush=True)
 
-    # app.run(main) owns the event loop. Start and stop Pyrogram on that
-    # same loop so peer resolution and dispatcher shutdown use one loop.
+    # app.run(main()) runs this coroutine on Pyrogram's event loop. Start and
+    # stop Pyrogram on that same loop so peer resolution and shutdown are clean.
     await app.start()
     try:
         await initialize_telegram_peers()
@@ -2441,4 +2441,4 @@ async def main():
         await app.stop()
 
 if __name__ == "__main__":
-    app.run(main)
+    app.run(main())
