@@ -1,6 +1,6 @@
 """Build the WatchHentai series index from listing pages only.
 
-This crawler first discovers series posts from listing pages, then opens each
+This crawler discovers series posts from listing pages, then opens each
 series post to extract its individual episode page URLs. It does NOT resolve
 media sources and does NOT download episodes.
 """
@@ -9,6 +9,7 @@ import json
 import os
 import re
 import sys
+from datetime import datetime, timezone
 from html import unescape
 from pathlib import Path
 from urllib.parse import urljoin, urlsplit
@@ -24,7 +25,40 @@ from providers.watchhentai import WatchHentai, ProviderError
 
 BASE_URL = os.getenv("WATCHHENTAI_BASE_URL", "https://watchhentai.net").rstrip("/")
 OUTPUT_ROOT = ROOT / "whdata"
+LOG_PATH = OUTPUT_ROOT / "scrape-log.json"
 MAX_PAGES = int(os.getenv("SERIES_INDEX_PAGES", "42"))
+
+
+def now_utc():
+    return datetime.now(timezone.utc).isoformat()
+
+
+def write_scrape_log(
+    *,
+    status,
+    page=None,
+    post_title=None,
+    post_url=None,
+    posts_scraped=0,
+    episodes_scraped=0,
+    error=None,
+):
+    OUTPUT_ROOT.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "status": status,
+        "updated_at": now_utc(),
+        "last_scraped_page": page,
+        "last_scraped_post": post_title,
+        "last_scraped_post_url": post_url,
+        "posts_scraped": posts_scraped,
+        "episodes_scraped": episodes_scraped,
+        "pages_requested": MAX_PAGES,
+        "error": error,
+    }
+    LOG_PATH.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
 
 
 def page_url(page):
@@ -115,9 +149,16 @@ def extract_thumbnail(card, anchor):
     return None
 
 
-def scrape_listing(provider, page):
+def scrape_listing(provider, page, progress):
     source_page = page_url(page)
     print(f"[index] page {page}: {source_page}", flush=True)
+    write_scrape_log(
+        status="running",
+        page=page,
+        posts_scraped=progress["posts"],
+        episodes_scraped=progress["episodes"],
+    )
+
     html = provider._get(source_page, BASE_URL + "/")
     soup = BeautifulSoup(html, "html.parser")
 
@@ -136,8 +177,12 @@ def scrape_listing(provider, page):
         card = find_card(anchor)
         title = extract_title(anchor, card)
         thumbnail = extract_thumbnail(card, anchor)
-        # Open the series post and extract its individual episode page URLs.
-        # This does not resolve media sources or download any episode.
+
+        print(
+            f"[index] page {page}: scraping post {title or detail_url} -> {detail_url}",
+            flush=True,
+        )
+
         episodes = provider.series_episodes(detail_url)
         episode_records = [
             {
@@ -162,6 +207,17 @@ def scrape_listing(provider, page):
             "page": page,
         })
 
+        progress["posts"] += 1
+        progress["episodes"] += len(episode_records)
+        write_scrape_log(
+            status="running",
+            page=page,
+            post_title=title,
+            post_url=detail_url,
+            posts_scraped=progress["posts"],
+            episodes_scraped=progress["episodes"],
+        )
+
     return records
 
 
@@ -169,7 +225,6 @@ def write_page(page, records):
     directory = OUTPUT_ROOT / f"page {page}"
     directory.mkdir(parents=True, exist_ok=True)
 
-    # Remove stale JSON files for this page before rewriting it.
     for old_file in directory.glob("*.json"):
         old_file.unlink()
 
@@ -189,18 +244,40 @@ def main():
     OUTPUT_ROOT.mkdir(parents=True, exist_ok=True)
     provider = WatchHentai()
 
-    total_records = 0
-    for page in range(1, MAX_PAGES + 1):
-        try:
-            records = scrape_listing(provider, page)
-            write_page(page, records)
-            total_records += len(records)
-            print(f"[index] page {page}: {len(records)} series posts", flush=True)
-        except Exception as exc:
-            raise ProviderError(f"Failed to scrape listing page {page}: {exc}") from exc
+    progress = {"posts": 0, "episodes": 0}
+    write_scrape_log(
+        status="started",
+        posts_scraped=0,
+        episodes_scraped=0,
+    )
 
-    print(f"[index] complete: {total_records} records across {MAX_PAGES} pages", flush=True)
-    return 0
+    try:
+        for page in range(1, MAX_PAGES + 1):
+            records = scrape_listing(provider, page, progress)
+            write_page(page, records)
+            print(f"[index] page {page}: {len(records)} series posts", flush=True)
+
+        write_scrape_log(
+            status="complete",
+            page=MAX_PAGES,
+            posts_scraped=progress["posts"],
+            episodes_scraped=progress["episodes"],
+        )
+        print(
+            f"[index] complete: {progress['posts']} records across "
+            f"{MAX_PAGES} pages, {progress['episodes']} episodes",
+            flush=True,
+        )
+        return 0
+    except Exception as exc:
+        write_scrape_log(
+            status="failed",
+            page=None,
+            posts_scraped=progress["posts"],
+            episodes_scraped=progress["episodes"],
+            error=str(exc),
+        )
+        raise ProviderError(f"Series index build failed: {exc}") from exc
 
 
 if __name__ == "__main__":
