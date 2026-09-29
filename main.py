@@ -53,6 +53,16 @@ CRAWL_STATES = {}
 DOWNLOAD_STATES = {}
 CHANNEL_SETUP_USERS = set()
 
+# Per-chat video merge sessions. Files remain on disk until the session is
+# merged or cancelled. This is intentionally separate from the GoFile upload
+# lifecycle so normal uploads can still clean up their temporary files.
+MERGE_SESSIONS = {}
+MERGE_LOCK = asyncio.Lock()
+MAX_MERGE_VIDEOS = max(int(os.getenv("MAX_MERGE_VIDEOS", "100")), 2)
+MAX_MERGE_FILE_BYTES = max(
+    int(os.getenv("MAX_MERGE_FILE_GB", "20")), 1
+) * 1024 * 1024 * 1024
+
 app = Client(
     "whbot",
     api_id=API_ID,
@@ -279,6 +289,269 @@ def mark_video_uploaded(post_id, message_id):
         con.close()
 
 
+
+def merge_keyboard():
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("➕ Add More Video", callback_data="merge:add"),
+            InlineKeyboardButton("🔗 Merge Videos", callback_data="merge:run"),
+        ],
+        [
+            InlineKeyboardButton("❌ Cancel Merge", callback_data="merge:cancel"),
+        ],
+    ])
+
+
+def merge_status_text(session):
+    files = session.get("files") or []
+    total_bytes = sum(
+        path.stat().st_size for path in files
+        if path.exists()
+    )
+    return (
+        "🎞️ <b>Video Merge Queue</b>\n\n"
+        f"📹 Videos: <b>{len(files)}</b>\n"
+        f"💾 Size: <b>{format_size(total_bytes)}</b>\n\n"
+        "Send another video to add it to the queue, or press "
+        "<b>Merge Videos</b> when you are finished."
+    )
+
+
+def _is_video_document(message):
+    document = getattr(message, "document", None)
+    if not document:
+        return False
+    mime = (getattr(document, "mime_type", None) or "").lower()
+    name = (getattr(document, "file_name", None) or "").lower()
+    return mime.startswith("video/") or name.endswith(
+        (".mp4", ".mkv", ".webm", ".mov", ".avi", ".m4v", ".ts")
+    )
+
+
+def _merge_safe_name(value):
+    return "".join(
+        char if char.isalnum() or char in "._-" else "_"
+        for char in value
+    )[:80] or "merged"
+
+
+def merge_videos_sync(input_paths, output_path):
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        raise RuntimeError("ffmpeg is not installed in this runtime.")
+
+    # The concat filter is used instead of stream-copy so videos with
+    # different codecs/resolutions/time bases can still be normalized into
+    # one MP4. FFmpeg documents this as the re-encoding concat approach.
+    inputs = []
+    for path in input_paths:
+        inputs.extend(["-i", str(path)])
+
+    filter_parts = []
+    for index in range(len(input_paths)):
+        filter_parts.append(
+            "[{0}:v:0]scale=trunc(iw/2)*2:trunc(ih/2)*2,"
+            "setsar=1,fps=30,format=yuv420p[v{0}];"
+            "[{0}:a:0]aresample=async=1:first_pts=0[a{0}]".format(index)
+        )
+
+    concat_inputs = "".join(
+        "[v{0}][a{0}]".format(index)
+        for index in range(len(input_paths))
+    )
+    filter_parts.append(
+        concat_inputs
+        + "concat=n={}:v=1:a=1[outv][outa]".format(len(input_paths))
+    )
+
+    command = [
+        ffmpeg,
+        "-hide_banner",
+        "-loglevel", "error",
+        "-y",
+        *inputs,
+        "-filter_complex", "".join(filter_parts),
+        "-map", "[outv]",
+        "-map", "[outa]",
+        "-c:v", "libx264",
+        "-preset", os.getenv("MERGE_PRESET", "veryfast"),
+        "-crf", os.getenv("MERGE_CRF", "23"),
+        "-c:a", "aac",
+        "-b:a", os.getenv("MERGE_AUDIO_BITRATE", "128k"),
+        "-movflags", "+faststart",
+        str(output_path),
+    ]
+
+    result = subprocess.run(
+        command,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            "ffmpeg merge failed: {}".format(
+                (result.stderr or "unknown ffmpeg error")[-2000:]
+            )
+        )
+    if not output_path.is_file() or output_path.stat().st_size == 0:
+        raise RuntimeError("ffmpeg finished without creating the merged video.")
+    return output_path
+
+
+async def start_merge_session(message, existing_files=None):
+    files = [
+        Path(path) for path in (existing_files or [])
+        if Path(path).is_file()
+    ]
+    MERGE_SESSIONS[message.chat.id] = {
+        "files": files,
+        "status_message_id": None,
+    }
+    text = merge_status_text(MERGE_SESSIONS[message.chat.id])
+    sent = await message.reply_text(text, reply_markup=merge_keyboard())
+    MERGE_SESSIONS[message.chat.id]["status_message_id"] = sent.id
+    return sent
+
+
+async def receive_merge_video(message):
+    session = MERGE_SESSIONS.get(message.chat.id)
+    if not session:
+        return False
+
+    if len(session["files"]) >= MAX_MERGE_VIDEOS:
+        await message.reply_text(
+            "❌ Merge limit reached: <b>{}</b> videos.".format(MAX_MERGE_VIDEOS)
+        )
+        return True
+
+    media = message.video or message.document
+    if not message.video and not _is_video_document(message):
+        return False
+
+    file_name = (
+        getattr(media, "file_name", None)
+        or getattr(message.video, "file_name", None)
+        or "video.mp4"
+    )
+    safe = _merge_safe_name(Path(file_name).stem)
+    destination = (
+        DOWNLOAD_DIR
+        / "merge"
+        / str(message.chat.id)
+        / "{}_{:03d}.mp4".format(safe, len(session["files"]) + 1)
+    )
+    destination.parent.mkdir(parents=True, exist_ok=True)
+
+    existing_bytes = sum(
+        path.stat().st_size for path in session["files"] if path.exists()
+    )
+    media_size = int(getattr(media, "file_size", 0) or 0)
+    if existing_bytes + media_size > MAX_MERGE_FILE_BYTES:
+        await message.reply_text(
+            "❌ Merge storage limit reached: <b>{}</b>.".format(
+                format_size(MAX_MERGE_FILE_BYTES)
+            )
+        )
+        return True
+
+    status = await message.reply_text(
+        "⬇️ Saving video <b>{}/{}</b> to the merge queue...".format(
+            len(session["files"]) + 1, MAX_MERGE_VIDEOS
+        )
+    )
+    try:
+        downloaded = await message.download(file_name=str(destination))
+        path = Path(downloaded or destination)
+        if not path.is_file():
+            raise RuntimeError("Telegram download completed but the file was not found.")
+
+        session["files"].append(path)
+        await safe_edit(status, merge_status_text(session))
+    except Exception as exc:
+        destination.unlink(missing_ok=True)
+        await safe_edit(
+            status,
+            "❌ Could not save video: " + html.escape(str(exc)),
+        )
+    return True
+
+
+async def run_merge_session(chat_id, status):
+    session = MERGE_SESSIONS.get(chat_id)
+    if not session:
+        await safe_edit(status, "❌ No active merge session.")
+        return
+
+    files = [path for path in session["files"] if path.is_file()]
+    if len(files) < 2:
+        await safe_edit(
+            status,
+            "⚠️ Send at least <b>2 videos</b> before merging.",
+            )
+        return
+
+    if MERGE_LOCK.locked():
+        await safe_edit(status, "⏳ Another merge is already running.")
+        return
+
+    await MERGE_LOCK.acquire()
+    output = (
+        DOWNLOAD_DIR
+        / "merge"
+        / str(chat_id)
+        / "merged-{}.mp4".format(int(time.time()))
+    )
+    try:
+        await safe_edit(
+            status,
+            "⚙️ <b>Merging {}</b> videos with FFmpeg...\n"
+            "This re-encodes the videos so different inputs can be joined.".format(
+                len(files)
+            ),
+        )
+        await asyncio.to_thread(merge_videos_sync, files, output)
+
+        metadata = await asyncio.to_thread(video_metadata, output)
+        size = output.stat().st_size
+        await safe_edit(
+            status,
+            "☁️ Uploading merged video to GoFile...",
+        )
+        uploader = GofileUploader()
+        started = time.monotonic()
+        gofile_url = await asyncio.to_thread(uploader.upload, output)
+        elapsed = max(time.monotonic() - started, 0.001)
+
+        caption = (
+            "🎞️ <b>Merged Video</b>\n"
+            f"📹 Parts: <b>{len(files)}</b>\n"
+            f"💾 Size: <b>{format_size(size)}</b>\n"
+            f"⏱ Duration: <b>{format_duration(metadata.get('duration'))}</b>\n"
+            f"⚡ GoFile upload: <b>{size / elapsed / 1048576:.2f} MB/s</b>\n\n"
+            f'☁️ <a href="{html.escape(gofile_url, quote=True)}">Download merged video</a>'
+        )
+        markup = InlineKeyboardMarkup(
+            [[InlineKeyboardButton("⬇️ Download from GoFile", url=gofile_url)]]
+        )
+        await app.send_message(chat_id, caption, reply_markup=markup)
+
+        # Only clean the source files after the final merge/upload succeeds.
+        for path in files:
+            path.unlink(missing_ok=True)
+        output.unlink(missing_ok=True)
+        MERGE_SESSIONS.pop(chat_id, None)
+        await safe_edit(status, "✅ <b>Merge complete.</b> The merged GoFile link was sent above.")
+    except Exception as exc:
+        await safe_edit(
+            status,
+            "❌ <b>Merge failed</b>\n" + html.escape(str(exc)),
+        )
+        # Keep the source videos so the user can retry without uploading them again.
+        output.unlink(missing_ok=True)
+    finally:
+        MERGE_LOCK.release()
+
+
 def episode_keyboard(ep):
     rows = []
     navigation = ep["navigation"]
@@ -500,6 +773,9 @@ async def download_and_send(
         print("[download/gofile] FAILED: {}".format(exc), flush=True)
         raise
     finally:
+        # Standalone episode downloads are still temporary. The new /merge
+        # workflow owns its own persistent files so normal GoFile downloads do
+        # not accumulate indefinitely.
         output.unlink(missing_ok=True)
         thumb.unlink(missing_ok=True)
 
@@ -820,6 +1096,23 @@ async def verify_channel_command(_, message):
             pass
 
 
+
+@app.on_message(filters.command("merge"))
+async def merge_command(_, message):
+    print("[command] /merge chat_id={}".format(message.chat.id), flush=True)
+    await start_merge_session(message)
+
+
+@app.on_message((filters.video | filters.document))
+async def merge_media(_, message):
+    # A video sent while a merge session is active is added to that session.
+    # Documents are accepted only when their MIME type or extension identifies
+    # them as a video.
+    if message.chat.id not in MERGE_SESSIONS:
+        return
+    await receive_merge_video(message)
+
+
 @app.on_message(filters.command("start"))
 async def start(_, message):
     await message.reply_text(
@@ -830,6 +1123,7 @@ async def start(_, message):
         "/stats - catalog statistics\n"
         "/crawl - crawl series catalog\n"
         "/download - download a complete series to the download channel\n"
+        "/merge - collect multiple videos and merge them into one\n"
         "/publish - publish catalog metadata\n"
         "/auto - sequentially upload pending episodes\n"
         "/setchannel - configure the download channel"
@@ -1078,13 +1372,18 @@ async def show_series_preview(message, series, episode_items):
         f"📺 Episodes found: <b>{len(episode_items)}</b>\n"
         f"📚 Total Episodes: <b>{total}</b>\n\n"
         "🔗 Episode pages have been collected.\n"
-        "⬇️ Press the button below to resolve each episode's actual video source and download it."
+        "⬇️ Download the episodes or use <b>Merge Episodes</b> to send the videos one by one and merge them."
     )
     markup = InlineKeyboardMarkup(
         [[
             InlineKeyboardButton(
                 "⬇️ Download All Episodes",
                 callback_data="sd:" + enc(series["series_url"]),
+            )
+        ], [
+            InlineKeyboardButton(
+                "🎞️ Merge Episodes",
+                callback_data="merge:add",
             )
         ]]
     )
@@ -1591,6 +1890,24 @@ async def callback(_, query):
     await query.answer()
 
     try:
+        if query.data == "merge:add":
+            await start_merge_session(query.message)
+            return
+
+        if query.data == "merge:cancel":
+            session = MERGE_SESSIONS.pop(query.message.chat.id, None)
+            if session:
+                for path in session.get("files", []):
+                    Path(path).unlink(missing_ok=True)
+            await query.message.edit_text("❌ <b>Merge session cancelled.</b>")
+            return
+
+        if query.data == "merge:run":
+            status = query.message
+            # Button callback is attached to the queue message itself.
+            await run_merge_session(query.message.chat.id, status)
+            return
+
         if query.data.startswith("sd:"):
             series_url = dec(query.data[3:])
             if AUTO_LOCK.locked():
