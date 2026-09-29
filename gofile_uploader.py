@@ -51,9 +51,8 @@ class GofileUploader:
             sent = 0
 
             yield prefix
-            sent += len(prefix)
             if progress_callback:
-                progress_callback(sent, total_bytes, started)
+                progress_callback(0, file_size, started)
 
             with path.open("rb") as file_handle:
                 while True:
@@ -63,12 +62,11 @@ class GofileUploader:
                     yield chunk
                     sent += len(chunk)
                     if progress_callback:
-                        progress_callback(sent, total_bytes, started)
+                        progress_callback(sent, file_size, started)
 
             yield suffix
-            sent += len(suffix)
             if progress_callback:
-                progress_callback(sent, total_bytes, started)
+                progress_callback(file_size, file_size, started)
 
         headers = {
             "Content-Type": "multipart/form-data; boundary={}".format(boundary),
@@ -113,7 +111,7 @@ class GofileUploader:
             )
 
         if progress_callback:
-            progress_callback(total_bytes, total_bytes, started)
+            progress_callback(file_size, file_size, started)
 
         print("[gofile] SUCCESS url={}".format(download_page), flush=True)
         return download_page
