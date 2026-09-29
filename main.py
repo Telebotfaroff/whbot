@@ -661,6 +661,8 @@ async def download_and_send(
     series_name=None,
     series_total=None,
     keep_local=False,
+    upload_to_gofile=True,
+    output_path=None,
 ):
     print("[download] title={} preferred={} sources={}".format(
         ep.get("title"), preferred_quality, len(ep.get("sources") or [])
@@ -684,7 +686,7 @@ async def download_and_send(
         for char in ep["title"]
     )[:80]
     label = source["label"]
-    output = DOWNLOAD_DIR / f"{safe}-{label}.mp4"
+    output = Path(output_path) if output_path else DOWNLOAD_DIR / f"{safe}-{label}.mp4"
     thumb = DOWNLOAD_DIR / f"{safe}-{label}.jpg"
     retained_output = False
 
@@ -707,9 +709,15 @@ async def download_and_send(
         print("[download] completed local file size={}".format(size), flush=True)
 
         metadata = await asyncio.to_thread(video_metadata, output)
-        print("[gofile] ffprobe duration={} width={} height={}".format(
+        print("[download] ffprobe duration={} width={} height={}".format(
             metadata.get("duration"), metadata.get("width"), metadata.get("height")
         ), flush=True)
+
+        # Merge-series mode keeps the downloaded episode on disk. It is uploaded
+        # only after all episodes have been concatenated into the final file.
+        if not upload_to_gofile:
+            retained_output = True
+            return {"message": None, "path": output, "metadata": metadata}
 
         if status:
             await status.edit_text("☁️ Uploading video to GoFile...")
