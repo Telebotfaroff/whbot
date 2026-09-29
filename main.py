@@ -473,7 +473,6 @@ async def download_and_send(
                     0,
                     0,
                     0,
-                    label,
                 ),
             )
 
