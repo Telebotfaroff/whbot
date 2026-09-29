@@ -943,6 +943,7 @@ async def download_and_send(
         gofile_url = await asyncio.to_thread(
             uploader.upload,
             output,
+            gofile_progress_factory(status),
         )
         elapsed = max(time.monotonic() - started, 0.001)
         print(
@@ -2084,6 +2085,27 @@ async def upload_progress(current, total, status, started):
         status,
         progress_text("📤 <b>Uploading to Telegram</b>", current, total, started),
     )
+
+
+def gofile_progress_factory(status):
+    state = {"last": 0.0}
+
+    def progress(current, total, started):
+        if status is None:
+            return
+        now = time.monotonic()
+        if now - state["last"] < PROGRESS_UPDATE_INTERVAL and current < total:
+            return
+        state["last"] = now
+        asyncio.run_coroutine_threadsafe(
+            safe_edit(
+                status,
+                progress_text("☁️ <b>Uploading to GoFile</b>", current, total, started),
+            ),
+            app.loop,
+        )
+
+    return progress
 
 
 def download_progress_factory(status):
