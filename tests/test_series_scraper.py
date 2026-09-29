@@ -71,3 +71,14 @@ def main():
         output.write("No Telegram action was performed.\\n")
     print(f"Result saved to: {result_file}")
 
+    print()
+    print("=== Scraper-only test passed ===")
+    print("No episode source resolution was performed.")
+    print("No video was downloaded.")
+    print("No GoFile upload was performed.")
+    print("No Telegram action was performed.")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
