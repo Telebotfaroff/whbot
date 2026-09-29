@@ -702,10 +702,14 @@ async def run_merge_session(chat_id, status):
                 len(files)
             ),
         )
-        total_duration = sum(
-            await asyncio.to_thread(_ffmpeg_input_duration, shutil.which("ffmpeg"), path)
-            for path in files
-        )
+        total_duration = 0.0
+        ffmpeg_path = shutil.which("ffmpeg")
+        for path in files:
+            total_duration += await asyncio.to_thread(
+                _ffmpeg_input_duration,
+                ffmpeg_path,
+                path,
+            )
         encoder_label = (
             "NVIDIA NVENC" if os.getenv("MERGE_ENCODER", "auto").strip().lower() != "cpu"
             else "CPU/libx264"
