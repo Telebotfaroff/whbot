@@ -431,7 +431,6 @@ async def download_and_send(
                 0,
                 0,
                 0,
-                label,
             ),
         )
 
@@ -1453,8 +1452,7 @@ async def download_series(
         await safe_edit(
             status,
             "🎬 <b>{}</b>\n\n"
-            "📥 <b>DOWNLOAD</b>\n"
-            "All episodes downloaded.\n\n"
+            "✅ <b>COMPLETE</b>\n\n"
             "📊 <b>Progress</b>\n"
             "{}".format(
                 html.escape(series["name"]),
@@ -1647,7 +1645,6 @@ def series_transfer_text(
     current,
     total,
     started,
-    quality=None,
 ):
     elapsed = max(time.monotonic() - started, 0.001) if started else 0.001
     speed = current / elapsed if current else 0.0
@@ -1664,14 +1661,13 @@ def series_transfer_text(
             icon = "⏳"
         queue.append("{} {}".format(number, icon))
 
-    quality_line = f"\n🎥 {html.escape(quality)}" if quality else ""
     eta_text = format_time(eta) if total and speed > 0 else "--"
     speed_text = format_size(speed) + "/s" if speed > 0 else "0 B/s"
 
     return (
         f"🎬 <b>{html.escape(title)}</b>\n\n"
         f"{'📥' if stage == 'download' else '☁️'} <b>{'DOWNLOAD' if stage == 'download' else 'UPLOAD'}</b>\n"
-        f"Episode <b>{episode_index} / {episode_total}</b>{quality_line}\n"
+        f"Episode <b>{episode_index} / {episode_total}</b>\n"
         f"<code>[{progress_bar(percent)}] {percent:5.1f}%</code>\n"
         f"⚡ {speed_text}  •  ⏱ ETA {eta_text}\n\n"
         f"📊 <b>Progress</b>\n"
