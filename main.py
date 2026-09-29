@@ -1374,7 +1374,7 @@ async def show_series_preview(message, series, episode_items):
         f"📺 Episodes found: <b>{len(episode_items)}</b>\n"
         f"📚 Total Episodes: <b>{total}</b>\n\n"
         "🔗 Episode pages have been collected.\n"
-        "⬇️ Download the episodes or use <b>Merge Episodes</b> to send the videos one by one and merge them."
+        "⬇️ Download episodes individually, or download every episode first and merge them into one video."
     )
     markup = InlineKeyboardMarkup(
         [[
@@ -1384,8 +1384,8 @@ async def show_series_preview(message, series, episode_items):
             )
         ], [
             InlineKeyboardButton(
-                "🎞️ Merge Episodes",
-                callback_data="merge:add",
+                "🎞️ Download & Merge All",
+                callback_data="sm:" + enc(series["series_url"]),
             )
         ]]
     )
@@ -1526,7 +1526,7 @@ async def download_series(
             )
 
             last_error = None
-            uploaded = False
+            completed = False
             for source in sources:
                 label = str(source.get("label") or "Unknown")
                 await safe_edit(
@@ -1536,12 +1536,28 @@ async def download_series(
                     ),
                 )
                 print(
-                    "[series download] trying episode {} quality={}".format(
-                        index, label
+                    "[series download] trying episode {} quality={} merge_mode={}".format(
+                        index, label, merge_series
                     ),
                     flush=True,
                 )
                 try:
+                    merge_output = None
+                    if merge_series:
+                        safe_episode = "".join(
+                            char if char.isalnum() or char in "._-" else "_"
+                            for char in ep["title"]
+                        )[:70] or "episode"
+                        merge_output = (
+                            DOWNLOAD_DIR
+                            / "merge"
+                            / str(fallback_chat_id or (message.chat.id if message else 0))
+                            / "{}_{:03d}-{}-{}.mp4".format(
+                                safe_episode, index, label, int(time.time())
+                            )
+                        )
+                        merge_output.parent.mkdir(parents=True, exist_ok=True)
+
                     result = await download_and_send(
                         ep,
                         upload_chat,
@@ -1549,15 +1565,17 @@ async def download_series(
                         status=status,
                         series_name=series["name"],
                         series_total=total,
-                        keep_local=bool(merge_chat_id),
+                        keep_local=bool(merge_chat_id or merge_series),
+                        upload_to_gofile=not merge_series,
+                        output_path=merge_output,
                     )
-                    if merge_chat_id and result.get("path"):
+                    if merge_series and result.get("path"):
                         session = MERGE_SESSIONS.setdefault(
-                            merge_chat_id,
+                            fallback_chat_id or (message.chat.id if message else 0),
                             {"files": [], "status_message_id": None},
                         )
                         session["files"].append(Path(result["path"]))
-                    uploaded = True
+                    completed = True
                     break
                 except Exception as source_exc:
                     last_error = source_exc
@@ -1568,7 +1586,7 @@ async def download_series(
                         flush=True,
                     )
 
-            if not uploaded:
+            if not completed:
                 raise ProviderError(
                     "Episode {}/{} failed for all available sources: {}".format(
                         index, total, last_error or "unknown error"
@@ -1577,9 +1595,11 @@ async def download_series(
 
             await safe_edit(
                 status,
-                "✅ <b>Episode {}/{}</b> uploaded to download channel.".format(
-                    index, total
-                ),
+                (
+                    "✅ <b>Episode {}/{}</b> downloaded and kept for merging."
+                    if merge_series
+                    else "✅ <b>Episode {}/{}</b> uploaded to download channel."
+                ).format(index, total),
             )
 
         await safe_edit(
@@ -1588,7 +1608,28 @@ async def download_series(
             f"{html.escape(series['name'])}\n"
             f"Episodes: <b>{total}</b>",
         )
-        if merge_chat_id:
+        if merge_series:
+            chat_id = fallback_chat_id or (message.chat.id if message else None)
+            session = MERGE_SESSIONS.get(chat_id)
+            if not session or len(session.get("files") or []) != total:
+                raise ProviderError(
+                    "Not all episodes were downloaded, so the complete series cannot be merged."
+                )
+            session["files"] = [
+                Path(path) for path in session["files"]
+                if Path(path).is_file()
+            ]
+            if len(session["files"]) != total:
+                raise ProviderError(
+                    "One or more downloaded episode files are missing from disk."
+                )
+            await safe_edit(
+                status,
+                "🎞️ <b>All {} episodes downloaded.</b>\n"
+                "🔗 Starting FFmpeg merge...".format(total),
+            )
+            await run_merge_session(chat_id, status)
+        elif merge_chat_id:
             session = MERGE_SESSIONS.get(merge_chat_id)
             if session and session.get("files"):
                 session["files"] = [
@@ -1952,12 +1993,43 @@ async def callback(_, query):
                     raise_on_error=False,
                     acquire_lock=True,
                     fallback_chat_id=query.message.chat.id,
-                    merge_chat_id=query.message.chat.id,
                 )
             except Exception as exc:
                 await safe_edit(
                     status,
                     "❌ Download failed: " + html.escape(str(exc)),
+                )
+            return
+
+        if query.data.startswith("sm:"):
+            series_url = dec(query.data[3:])
+            if AUTO_LOCK.locked():
+                await query.message.reply_text(
+                    "⏳ Another download/upload job is already running."
+                )
+                return
+
+            chat_id = query.message.chat.id
+            MERGE_SESSIONS.pop(chat_id, None)
+            status = await query.message.reply_text(
+                "🎞️ <b>Starting Download & Merge</b>\n"
+                "Episodes will be downloaded to disk first. GoFile upload happens only after the merge."
+            )
+            try:
+                await download_series(
+                    message=None,
+                    series_url=series_url,
+                    status=status,
+                    raise_on_error=False,
+                    acquire_lock=True,
+                    fallback_chat_id=chat_id,
+                    merge_chat_id=chat_id,
+                    merge_series=True,
+                )
+            except Exception as exc:
+                await safe_edit(
+                    status,
+                    "❌ Download & merge failed: " + html.escape(str(exc)),
                 )
             return
 
