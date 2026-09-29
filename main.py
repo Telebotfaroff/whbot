@@ -700,12 +700,27 @@ async def receive_merge_video(message):
         )
         return True
 
-    status = await message.reply_text(
-        "⬇️ Saving video <b>{}/{}</b> to the merge queue...".format(
-            len(session["files"]) + 1, MAX_MERGE_VIDEOS
-        )
-    )
+    # Reuse the existing merge status message. Do not create a new
+    # Telegram message for every video or every progress stage.
+    status = None
+    status_message_id = session.get("status_message_id")
+    if status_message_id:
+        try:
+            status = await app.get_messages(message.chat.id, status_message_id)
+        except Exception as exc:
+            print("[merge] could not reuse status message: {}".format(exc), flush=True)
+
+    if status is None:
+        status = await message.reply_text(merge_status_text(session))
+        session["status_message_id"] = status.id
+
     try:
+        await safe_edit(
+            status,
+            "⬇️ <b>Saving video {}/{}</b> to the merge queue...".format(
+                len(session["files"]) + 1, MAX_MERGE_VIDEOS
+            ),
+        )
         downloaded = await message.download(file_name=str(destination))
         path = Path(downloaded or destination)
         if not path.is_file():
