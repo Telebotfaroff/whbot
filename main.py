@@ -660,6 +660,7 @@ async def download_and_send(
     post_id=None,
     series_name=None,
     series_total=None,
+    keep_local=False,
 ):
     print("[download] title={} preferred={} sources={}".format(
         ep.get("title"), preferred_quality, len(ep.get("sources") or [])
@@ -768,15 +769,13 @@ async def download_and_send(
         if post_id is not None:
             mark_video_uploaded(post_id, sent.id)
 
-        return sent
+        return {"message": sent, "path": output if keep_local else None}
     except Exception as exc:
         print("[download/gofile] FAILED: {}".format(exc), flush=True)
         raise
     finally:
-        # Standalone episode downloads are still temporary. The new /merge
-        # workflow owns its own persistent files so normal GoFile downloads do
-        # not accumulate indefinitely.
-        output.unlink(missing_ok=True)
+        if not keep_local:
+            output.unlink(missing_ok=True)
         thumb.unlink(missing_ok=True)
 
 
@@ -1414,6 +1413,7 @@ async def download_series(
     raise_on_error=False,
     acquire_lock=True,
     fallback_chat_id=None,
+    merge_chat_id=None,
 ):
 
     upload_chat = DOWNLOAD_CHANNEL_ID
@@ -1539,14 +1539,21 @@ async def download_series(
                     flush=True,
                 )
                 try:
-                    await download_and_send(
+                    result = await download_and_send(
                         ep,
                         upload_chat,
                         preferred_quality=label,
                         status=status,
                         series_name=series["name"],
                         series_total=total,
+                        keep_local=bool(merge_chat_id),
                     )
+                    if merge_chat_id and result.get("path"):
+                        session = MERGE_SESSIONS.setdefault(
+                            merge_chat_id,
+                            {"files": [], "status_message_id": None},
+                        )
+                        session["files"].append(Path(result["path"]))
                     uploaded = True
                     break
                 except Exception as source_exc:
@@ -1891,7 +1898,8 @@ async def callback(_, query):
 
     try:
         if query.data == "merge:add":
-            await start_merge_session(query.message)
+            existing = MERGE_SESSIONS.get(query.message.chat.id, {}).get("files", [])
+            await start_merge_session(query.message, existing_files=existing)
             return
 
         if query.data == "merge:cancel":
@@ -1928,6 +1936,7 @@ async def callback(_, query):
                     raise_on_error=False,
                     acquire_lock=True,
                     fallback_chat_id=query.message.chat.id,
+                    merge_chat_id=query.message.chat.id,
                 )
             except Exception as exc:
                 await safe_edit(
