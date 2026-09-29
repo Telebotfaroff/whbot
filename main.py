@@ -63,19 +63,12 @@ provider = WatchHentai()
 
 
 async def validate_download_channel():
-    """Resolve and validate the configured Telegram download channel.
-
-    A fresh Colab runtime can start with an empty Pyrogram peer cache. In that
-    situation a numeric -100... channel ID may raise PEER_ID_INVALID even when
-    the bot is still a member/admin and the same ID worked in an older runtime.
-    We therefore try the normal lookup first, then populate the peer cache from
-    the bot's dialogs before retrying.
-    """
+    """Resolve and validate the configured Telegram download channel."""
     if not DOWNLOAD_CHANNEL_ID:
         print("[telegram] DOWNLOAD_CHANNEL_ID is not configured", flush=True)
         return False
 
-    async def resolve_and_log():
+    try:
         chat = await app.get_chat(DOWNLOAD_CHANNEL_ID)
         print(
             "[telegram] download channel OK: id={} title={} type={}".format(
@@ -97,45 +90,10 @@ async def validate_download_channel():
             flush=True,
         )
         return True
-
-    try:
-        return await resolve_and_log()
-    except Exception as first_exc:
-        print(
-            "[telegram] direct channel resolution failed: {}".format(first_exc),
-            flush=True,
-        )
-
-        # Numeric channel IDs depend on Pyrogram's peer cache. Enumerating
-        # dialogs lets Telegram return the channel to the active session and
-        # gives Pyrogram the InputPeer it needs.
-        try:
-            print(
-                "[telegram] refreshing channel peer cache from dialogs...",
-                flush=True,
-            )
-            target_id = int(str(DOWNLOAD_CHANNEL_ID).strip())
-            async for dialog in app.get_dialogs():
-                chat = getattr(dialog, "chat", None)
-                if chat and getattr(chat, "id", None) == target_id:
-                    print(
-                        "[telegram] channel found in dialogs: {} ({})".format(
-                            getattr(chat, "title", None) or target_id,
-                            target_id,
-                        ),
-                        flush=True,
-                    )
-                    await app.resolve_peer(chat.id)
-                    return True
-        except Exception as dialog_exc:
-            print(
-                "[telegram] dialog peer refresh failed: {}".format(dialog_exc),
-                flush=True,
-            )
-
+    except Exception as exc:
         print(
             "[telegram] DOWNLOAD_CHANNEL_ID INVALID/INACCESSIBLE: {} ({})".format(
-                DOWNLOAD_CHANNEL_ID, first_exc
+                DOWNLOAD_CHANNEL_ID, exc
             ),
             flush=True,
         )
@@ -612,6 +570,92 @@ async def incoming_debug(_, message):
             ), flush=True)
     except Exception as exc:
         print("[incoming] log error: {}".format(exc), flush=True)
+
+
+@app.on_message(filters.private, group=-2)
+async def bootstrap_channel_from_forward(_, message):
+    """Learn/cache a channel peer from a directly forwarded channel post.
+
+    Telegram bots cannot enumerate dialogs, so a fresh Pyrogram session may
+    not know a private channel from its numeric ID alone. A direct forward
+    from the target channel contains the channel peer and lets Pyrogram cache
+    it. This is intentionally a non-command handler so /start and /download
+    remain the only bot commands.
+    """
+    if not owner_only(message):
+        return
+
+    forwarded_chat = getattr(message, "forward_from_chat", None)
+
+    # Pyrogram 2 can expose newer forward-origin objects on some updates.
+    if forwarded_chat is None:
+        origin = getattr(message, "forward_origin", None)
+        forwarded_chat = getattr(origin, "chat", None)
+
+    if not forwarded_chat:
+        return
+
+    chat_type = (
+        getattr(getattr(forwarded_chat, "type", None), "value", None)
+        or str(getattr(forwarded_chat, "type", ""))
+    )
+    if chat_type != "channel":
+        return
+
+    channel_id = getattr(forwarded_chat, "id", None)
+    if not channel_id:
+        return
+
+    print(
+        "[telegram setup] forwarded channel detected id={} title={}".format(
+            channel_id,
+            getattr(forwarded_chat, "title", None)
+            or getattr(forwarded_chat, "username", None)
+            or "unknown",
+        ),
+        flush=True,
+    )
+
+    # The forwarded update itself gives Telegram the channel peer. Explicitly
+    # resolve it before saving so later uploads can use the cached peer.
+    try:
+        await app.resolve_peer(channel_id)
+        save_download_channel_setting(channel_id)
+        print(
+            "[telegram setup] channel peer cached and saved: {}".format(
+                channel_id
+            ),
+            flush=True,
+        )
+
+        if await validate_download_channel():
+            await message.reply_text(
+                "✅ <b>Download channel connected.</b>\n\n"
+                "📥 Channel: <b>{}</b>\n"
+                "🆔 ID: <code>{}</code>".format(
+                    html.escape(
+                        str(
+                            getattr(forwarded_chat, "title", None)
+                            or getattr(forwarded_chat, "username", None)
+                            or "Unknown"
+                        )
+                    ),
+                    channel_id,
+                )
+            )
+        else:
+            await message.reply_text(
+                "⚠️ I received the channel post, but Telegram still did not "
+                "allow the bot to resolve the channel. Make sure this bot is "
+                "still an administrator in that channel."
+            )
+    except Exception as exc:
+        print(
+            "[telegram setup] forwarded channel bootstrap failed: {}".format(
+                exc
+            ),
+            flush=True,
+        )
 
 
 @app.on_message(filters.command("start"))
