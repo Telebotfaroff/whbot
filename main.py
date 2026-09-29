@@ -458,8 +458,6 @@ async def download_and_send(
             metadata.get("duration"), metadata.get("width"), metadata.get("height")
         ), flush=True)
 
-        # Merge-series mode keeps the downloaded episode on disk. It is uploaded
-        # only after all episodes have been concatenated into the final file.
         if not upload_to_gofile:
             retained_output = True
             return {"message": None, "path": output, "metadata": metadata}
@@ -1236,7 +1234,7 @@ async def show_series_preview(message, series, episode_items):
         f"📺 Episodes found: <b>{len(episode_items)}</b>\n"
         f"📚 Total Episodes: <b>{total}</b>\n\n"
         "🔗 Episode pages have been collected.\n"
-        "⬇️ Download episodes individually, or download every episode first and merge them into one video."
+        "⬇️ Download episodes individually, or download every episode to GoFile."
     )
     markup = InlineKeyboardMarkup(
         [[
