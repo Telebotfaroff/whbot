@@ -60,10 +60,7 @@ class GofileUploader:
                     )
                     progress_callback(file_bytes, file_size, started)
 
-            body = MultipartEncoderMonitor.create(
-                encoder,
-                on_progress,
-            )
+            body = MultipartEncoderMonitor(encoder, on_progress)
 
             try:
                 response = requests.post(
