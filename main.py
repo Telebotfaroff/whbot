@@ -686,6 +686,7 @@ async def download_and_send(
     label = source["label"]
     output = DOWNLOAD_DIR / f"{safe}-{label}.mp4"
     thumb = DOWNLOAD_DIR / f"{safe}-{label}.jpg"
+    retained_output = False
 
     if status:
         await status.edit_text(
@@ -766,15 +767,16 @@ async def download_and_send(
             )
 
         print("[gofile] Telegram link message id={}".format(sent.id), flush=True)
+        retained_output = bool(keep_local)
         if post_id is not None:
             mark_video_uploaded(post_id, sent.id)
 
-        return {"message": sent, "path": output if keep_local else None}
+        return {"message": sent, "path": output if retained_output else None}
     except Exception as exc:
         print("[download/gofile] FAILED: {}".format(exc), flush=True)
         raise
     finally:
-        if not keep_local:
+        if not retained_output:
             output.unlink(missing_ok=True)
         thumb.unlink(missing_ok=True)
 
@@ -1585,6 +1587,19 @@ async def download_series(
             f"{html.escape(series['name'])}\n"
             f"Episodes: <b>{total}</b>",
         )
+        if merge_chat_id:
+            session = MERGE_SESSIONS.get(merge_chat_id)
+            if session and session.get("files"):
+                session["files"] = [
+                    Path(path) for path in session["files"]
+                    if Path(path).is_file()
+                ]
+                merge_message = await app.send_message(
+                    merge_chat_id,
+                    merge_status_text(session),
+                    reply_markup=merge_keyboard(),
+                )
+                session["status_message_id"] = merge_message.id
     except Exception as exc:
         print(
             "[series download] FAILED: {}: {}".format(type(exc).__name__, exc),
