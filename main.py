@@ -63,11 +63,19 @@ provider = WatchHentai()
 
 
 async def validate_download_channel():
-    """Resolve and validate the configured Telegram download channel."""
+    """Resolve and validate the configured Telegram download channel.
+
+    A fresh Colab runtime can start with an empty Pyrogram peer cache. In that
+    situation a numeric -100... channel ID may raise PEER_ID_INVALID even when
+    the bot is still a member/admin and the same ID worked in an older runtime.
+    We therefore try the normal lookup first, then populate the peer cache from
+    the bot's dialogs before retrying.
+    """
     if not DOWNLOAD_CHANNEL_ID:
         print("[telegram] DOWNLOAD_CHANNEL_ID is not configured", flush=True)
         return False
-    try:
+
+    async def resolve_and_log():
         chat = await app.get_chat(DOWNLOAD_CHANNEL_ID)
         print(
             "[telegram] download channel OK: id={} title={} type={}".format(
@@ -81,10 +89,6 @@ async def validate_download_channel():
             ),
             flush=True,
         )
-
-        # Force Pyrogram's active bot session to resolve/cache the peer now.
-        # This runs at startup as well as before upload jobs, preventing a
-        # PEER_ID_INVALID caused by a peer that has not yet been resolved.
         peer = await app.resolve_peer(chat.id)
         print(
             "[telegram] Pyrogram peer resolved: id={} peer_type={}".format(
@@ -93,10 +97,45 @@ async def validate_download_channel():
             flush=True,
         )
         return True
-    except Exception as exc:
+
+    try:
+        return await resolve_and_log()
+    except Exception as first_exc:
+        print(
+            "[telegram] direct channel resolution failed: {}".format(first_exc),
+            flush=True,
+        )
+
+        # Numeric channel IDs depend on Pyrogram's peer cache. Enumerating
+        # dialogs lets Telegram return the channel to the active session and
+        # gives Pyrogram the InputPeer it needs.
+        try:
+            print(
+                "[telegram] refreshing channel peer cache from dialogs...",
+                flush=True,
+            )
+            target_id = int(str(DOWNLOAD_CHANNEL_ID).strip())
+            async for dialog in app.get_dialogs():
+                chat = getattr(dialog, "chat", None)
+                if chat and getattr(chat, "id", None) == target_id:
+                    print(
+                        "[telegram] channel found in dialogs: {} ({})".format(
+                            getattr(chat, "title", None) or target_id,
+                            target_id,
+                        ),
+                        flush=True,
+                    )
+                    await app.resolve_peer(chat.id)
+                    return True
+        except Exception as dialog_exc:
+            print(
+                "[telegram] dialog peer refresh failed: {}".format(dialog_exc),
+                flush=True,
+            )
+
         print(
             "[telegram] DOWNLOAD_CHANNEL_ID INVALID/INACCESSIBLE: {} ({})".format(
-                DOWNLOAD_CHANNEL_ID, exc
+                DOWNLOAD_CHANNEL_ID, first_exc
             ),
             flush=True,
         )
