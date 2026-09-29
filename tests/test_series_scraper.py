@@ -52,14 +52,22 @@ def main():
     for index, episode in enumerate(episodes, 1):
         print(f"{index}. {episode['page_url']}")
 
-    print()
-    print("=== Scraper-only test passed ===")
-    print("No episode source resolution was performed.")
-    print("No video was downloaded.")
-    print("No GoFile upload was performed.")
-    print("No Telegram action was performed.")
-    return 0
+    result_file = os.environ.get("SERIES_RESULT_FILE", "series-result.txt")
+    with open(result_file, "w", encoding="utf-8") as output:
+        output.write("=== WHBot Series Scraper Result ===\\n")
+        output.write(f"Series URL: {series_url}\\n")
+        output.write(f"Canonical URL: {canonical_url}\\n")
+        output.write(f"Series: {series.get('name') or 'Unknown'}\\n")
+        output.write(f"Thumbnail: {series.get('thumbnail') or 'None'}\\n")
+        output.write(f"Metadata episode count: {series.get('total_episodes', 0)}\\n")
+        output.write(f"Extracted episode count: {len(episodes)}\\n\\n")
+        output.write("Episode URLs:\\n")
+        for index, episode in enumerate(episodes, 1):
+            output.write(f"{index}. {episode['page_url']}\\n")
+        output.write("\\n=== Scraper-only test passed ===\\n")
+        output.write("No episode source resolution was performed.\\n")
+        output.write("No video was downloaded.\\n")
+        output.write("No GoFile upload was performed.\\n")
+        output.write("No Telegram action was performed.\\n")
+    print(f"Result saved to: {result_file}")
 
-
-if __name__ == "__main__":
-    raise SystemExit(main())
