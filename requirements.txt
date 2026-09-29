@@ -3,3 +3,4 @@ tgcrypto>=1.2,<2
 python-dotenv>=1,<2
 requests>=2.31,<3
 Pillow>=10,<13
+requests-toolbelt>=1,<2
