@@ -1,11 +1,11 @@
 {
   "status": "complete",
-  "updated_at": "2026-10-12T18:16:09.946891+00:00",
-  "last_scraped_page": 2,
+  "updated_at": "2026-10-21T15:00:09.782652+00:00",
+  "last_scraped_page": 1,
   "last_scraped_post": null,
   "last_scraped_post_url": null,
-  "posts_scraped": 85,
-  "episodes_scraped": 330,
-  "pages_requested": 2,
+  "posts_scraped": 40,
+  "episodes_scraped": 202,
+  "pages_requested": 1,
   "error": null
 }
