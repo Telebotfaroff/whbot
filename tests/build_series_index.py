@@ -1,18 +1,17 @@
-"""Build the WatchHentai series index from listing pages only.
+"""Build a durable, deduplicated WatchHentai series index.
 
-This crawler discovers series posts from listing pages, then opens each
-series post to extract its individual episode page URLs. It does NOT resolve
-media sources and does NOT download episodes.
+The crawler indexes series metadata and episode page URLs only. It does not
+resolve media sources or download episodes.
 """
-
 import json
 import os
 import re
 import sys
+import time
 from datetime import datetime, timezone
 from html import unescape
 from pathlib import Path
-from urllib.parse import urljoin, urlsplit
+from urllib.parse import urljoin, urlsplit, urlunsplit
 
 from bs4 import BeautifulSoup
 
@@ -24,13 +23,59 @@ from providers.watchhentai import WatchHentai, ProviderError
 
 
 BASE_URL = os.getenv("WATCHHENTAI_BASE_URL", "https://watchhentai.net").rstrip("/")
-OUTPUT_ROOT = ROOT / "whdata"
+OUTPUT_ROOT = Path(os.getenv("SERIES_INDEX_OUTPUT_ROOT", str(ROOT / "whdata")))
 LOG_PATH = OUTPUT_ROOT / "scrape-log.json"
-MAX_PAGES = int(os.getenv("SERIES_INDEX_PAGES", "42"))
+STATE_PATH = Path(os.getenv("SERIES_INDEX_STATE_PATH", str(OUTPUT_ROOT / ".scrape-state.json")))
+MAX_PAGES = max(1, int(os.getenv("SERIES_INDEX_PAGES", "42")))
+MAX_EMPTY_PAGES = max(1, int(os.getenv("SERIES_INDEX_MAX_EMPTY_PAGES", "2")))
+PAGE_RETRIES = max(1, int(os.getenv("SERIES_INDEX_PAGE_RETRIES", "3")))
+REQUEST_DELAY = max(0.0, float(os.getenv("SERIES_INDEX_DELAY", "0.25")))
 
 
 def now_utc():
     return datetime.now(timezone.utc).isoformat()
+
+
+def canonical_url(url, base_url=BASE_URL):
+    """Normalize an internal URL so equivalent links share one dedupe key."""
+    if not url:
+        return None
+    absolute = urljoin(base_url.rstrip("/") + "/", str(url).strip())
+    parsed = urlsplit(absolute)
+    if parsed.scheme.lower() not in {"http", "https"} or not parsed.hostname:
+        return None
+    host = parsed.hostname.lower()
+    port = parsed.port
+    netloc = host if port is None or (parsed.scheme.lower(), port) in {
+        ("http", 80), ("https", 443)
+    } else f"{host}:{port}"
+    path = re.sub(r"/+", "/", parsed.path or "/").rstrip("/")
+    if not path:
+        path = "/"
+    return urlunsplit((parsed.scheme.lower(), netloc, path, "", ""))
+
+
+def is_series_detail(url):
+    normalized = canonical_url(url)
+    if not normalized:
+        return False
+    parsed = urlsplit(normalized)
+    base = urlsplit(BASE_URL)
+    return (
+        parsed.hostname == (base.hostname or "").lower()
+        and bool(re.fullmatch(r"/series/[^/]+", parsed.path, re.I))
+    )
+
+
+def clean_text(value):
+    return re.sub(r"\s+", " ", unescape(value or "")).strip()
+
+
+def safe_filename(title, fallback_index):
+    title = clean_text(title)
+    title = re.sub(r'[<>:"/\\|?*]', "_", title)
+    title = re.sub(r"\s+", " ", title).strip(" .")
+    return title[:180] or f"post-{fallback_index}"
 
 
 def write_scrape_log(
@@ -53,36 +98,37 @@ def write_scrape_log(
         "posts_scraped": posts_scraped,
         "episodes_scraped": episodes_scraped,
         "pages_requested": MAX_PAGES,
+        "max_consecutive_empty_pages": MAX_EMPTY_PAGES,
         "error": error,
     }
-    LOG_PATH.write_text(
-        json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
-        encoding="utf-8",
-    )
+    temporary = LOG_PATH.with_suffix(".json.tmp")
+    temporary.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    temporary.replace(LOG_PATH)
+
+
+def read_state():
+    try:
+        return json.loads(STATE_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def write_state(*, status, next_page, completed_pages, error=None):
+    STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "status": status,
+        "next_page": next_page,
+        "completed_pages": sorted(set(completed_pages)),
+        "updated_at": now_utc(),
+        "error": error,
+    }
+    temporary = STATE_PATH.with_suffix(STATE_PATH.suffix + ".tmp")
+    temporary.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    temporary.replace(STATE_PATH)
 
 
 def page_url(page):
     return f"{BASE_URL}/series/" if page == 1 else f"{BASE_URL}/series/page/{page}/"
-
-
-def clean_text(value):
-    return re.sub(r"\s+", " ", unescape(value or "")).strip()
-
-
-def safe_filename(title, fallback_index):
-    title = clean_text(title)
-    title = re.sub(r'[<>:"/\\|?*]', "_", title)
-    title = re.sub(r"\s+", " ", title).strip(" .")
-    return title[:180] or f"post-{fallback_index}"
-
-
-def is_series_detail(url):
-    parsed = urlsplit(url)
-    base = urlsplit(BASE_URL)
-    return (
-        parsed.netloc.lower() == base.netloc.lower()
-        and bool(re.fullmatch(r"/series/[^/]+", parsed.path.rstrip("/"), re.I))
-    )
 
 
 def find_card(anchor):
@@ -103,12 +149,10 @@ def find_card(anchor):
 
 def extract_total_episodes(text):
     text = clean_text(text)
-    patterns = [
+    for pattern in (
         r"(\d+)\s*(?:episodes?|eps?)(?:\b|$)",
         r"(?:episodes?|eps?)\s*[:\-]?\s*(\d+)",
-        r"(\d+)\s*episode\b",
-    ]
-    for pattern in patterns:
+    ):
         match = re.search(pattern, text, re.I)
         if match:
             return int(match.group(1))
@@ -120,33 +164,43 @@ def extract_title(anchor, card):
         value = clean_text(anchor.get(attr))
         if value:
             return value
-
     image = card.find("img")
     if image:
         for attr in ("alt", "title"):
             value = clean_text(image.get(attr))
             if value:
                 return value
-
     heading = card.find(re.compile(r"^h[1-6]$"))
     if heading:
         value = clean_text(heading.get_text(" ", strip=True))
         if value:
             return value
-
     return clean_text(anchor.get_text(" ", strip=True))
 
 
-def extract_thumbnail(card, anchor):
+def extract_thumbnail(card):
     image = card.find("img")
     if not image:
         return None
-
     for attr in ("data-src", "data-lazy-src", "data-original", "src"):
         value = clean_text(image.get(attr))
         if value:
             return urljoin(BASE_URL + "/", value)
     return None
+
+
+def _looks_like_block_page(html):
+    sample = (html or "").lower()
+    markers = (
+        "cf-chl-",
+        "challenge-platform",
+        "verify you are human",
+        "checking your browser",
+        "captcha",
+        "access denied",
+        "just a moment...",
+    )
+    return any(marker in sample for marker in markers)
 
 
 def scrape_listing(provider, page, progress):
@@ -161,41 +215,33 @@ def scrape_listing(provider, page, progress):
 
     html = provider._get(source_page, BASE_URL + "/")
     soup = BeautifulSoup(html, "html.parser")
-
     records = []
-    seen = set()
+    seen_on_page = set()
 
     for anchor in soup.find_all("a", href=True):
-        href = urljoin(BASE_URL + "/", anchor["href"].split("#", 1)[0])
-        parsed = urlsplit(href)
-        detail_url = f"{parsed.scheme}://{parsed.netloc}{parsed.path.rstrip('/')}"
-        if not is_series_detail(detail_url):
-            continue
-        if detail_url in seen:
+        detail_url = canonical_url(anchor["href"], BASE_URL)
+        if not is_series_detail(detail_url) or detail_url in seen_on_page:
             continue
 
         card = find_card(anchor)
-        title = extract_title(anchor, card)
-        thumbnail = extract_thumbnail(card, anchor)
-
-        print(
-            f"[index] page {page}: scraping post {title or detail_url} -> {detail_url}",
-            flush=True,
-        )
+        title = extract_title(anchor, card) or detail_url.rsplit("/", 1)[-1]
+        thumbnail = extract_thumbnail(card)
+        print(f"[index] page {page}: {title} -> {detail_url}", flush=True)
 
         episodes = provider.series_episodes(detail_url)
-        episode_records = [
-            {
-                "episode": index,
-                "url": episode["page_url"],
-            }
-            for index, episode in enumerate(episodes, 1)
-        ]
+        episode_records = []
+        seen_episodes = set()
+        for episode in episodes:
+            episode_url = canonical_url(episode.get("page_url"), BASE_URL)
+            if not episode_url or episode_url in seen_episodes:
+                continue
+            seen_episodes.add(episode_url)
+            episode_records.append({"episode": len(episode_records) + 1, "url": episode_url})
+
         total_episodes = len(episode_records) or extract_total_episodes(
             card.get_text(" ", strip=True)
         )
-
-        seen.add(detail_url)
+        seen_on_page.add(detail_url)
         records.append({
             "post_title": title,
             "post_url": detail_url,
@@ -221,32 +267,65 @@ def scrape_listing(provider, page, progress):
             episodes_scraped=progress["episodes"],
         )
 
+    if not records and _looks_like_block_page(html):
+        raise ProviderError(f"Page {page} returned a challenge/block page; not treating it as end-of-pagination")
     return records
 
 
+def existing_urls_before(start_page):
+    """Load URLs from already completed earlier pages when resuming a crawl."""
+    found = set()
+    for directory in OUTPUT_ROOT.glob("page *"):
+        match = re.fullmatch(r"page\s+(\d+)", directory.name)
+        if not match or int(match.group(1)) >= start_page:
+            continue
+        for path in directory.glob("*.json"):
+            try:
+                record = json.loads(path.read_text(encoding="utf-8"))
+                url = canonical_url(record.get("post_url") or record.get("link"))
+                if url:
+                    found.add(url)
+            except (OSError, json.JSONDecodeError):
+                print(f"[index] warning: ignoring invalid existing JSON: {path}", flush=True)
+    return found
+
+
 def write_page(page, records):
+    """Replace a page only after every new JSON file has been written successfully."""
     directory = OUTPUT_ROOT / f"page {page}"
     directory.mkdir(parents=True, exist_ok=True)
 
-    for old_file in directory.glob("*.json"):
-        old_file.unlink()
-
     used = {}
-    for index, record in enumerate(records, 1):
-        base = safe_filename(record["post_title"], index)
-        used[base] = used.get(base, 0) + 1
-        filename = base if used[base] == 1 else f"{base}-{used[base]}"
-        path = directory / f"{filename}.json"
-        path.write_text(
-            json.dumps(record, ensure_ascii=False, indent=2) + "\n",
-            encoding="utf-8",
-        )
+    staged = []
+    try:
+        for index, record in enumerate(records, 1):
+            base = safe_filename(record.get("post_title"), index)
+            used[base] = used.get(base, 0) + 1
+            filename = base if used[base] == 1 else f"{base}-{used[base]}"
+            target = directory / f"{filename}.json"
+            temporary = target.with_suffix(".json.tmp")
+            temporary.write_text(
+                json.dumps(record, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            staged.append((temporary, target))
+
+        new_names = {target.name for _, target in staged}
+        for temporary, target in staged:
+            temporary.replace(target)
+
+        for old_file in directory.glob("*.json"):
+            if old_file.name not in new_names:
+                old_file.unlink()
+    except Exception:
+        for temporary, _ in staged:
+            temporary.unlink(missing_ok=True)
+        raise
 
 
 def main():
     OUTPUT_ROOT.mkdir(parents=True, exist_ok=True)
     provider = WatchHentai()
-
     progress = {
         "posts": 0,
         "episodes": 0,
@@ -254,34 +333,96 @@ def main():
         "last_post": None,
         "last_post_url": None,
     }
-    write_scrape_log(
-        status="started",
-        posts_scraped=0,
-        episodes_scraped=0,
+    state = read_state()
+    resume = os.getenv("SERIES_INDEX_RESUME", "1").strip().lower() not in {"0", "false", "no"}
+    start_page = 1
+    if resume and state.get("status") in {"running", "failed"}:
+        candidate = state.get("next_page")
+        if isinstance(candidate, int) and 1 <= candidate <= MAX_PAGES:
+            start_page = candidate
+            print(f"[index] resuming at page {start_page}", flush=True)
+
+    completed_pages = set(
+        p for p in state.get("completed_pages", [])
+        if isinstance(p, int) and 1 <= p < start_page
     )
+    seen_urls = existing_urls_before(start_page)
+    empty_pages = 0
+    first_empty_page = None
+    write_state(status="running", next_page=start_page, completed_pages=completed_pages)
+    write_scrape_log(status="started", page=start_page)
 
+    page = start_page
     try:
-        for page in range(1, MAX_PAGES + 1):
-            records = scrape_listing(provider, page, progress)
-            write_page(page, records)
-            print(f"[index] page {page}: {len(records)} series posts", flush=True)
+        while page <= MAX_PAGES:
+            records = None
+            last_error = None
+            for attempt in range(1, PAGE_RETRIES + 1):
+                try:
+                    records = scrape_listing(provider, page, progress)
+                    break
+                except Exception as exc:
+                    last_error = exc
+                    print(f"[index] page {page} attempt {attempt}/{PAGE_RETRIES} failed: {exc}", flush=True)
+                    if attempt < PAGE_RETRIES:
+                        time.sleep(min(2 ** attempt, 10))
+            if records is None:
+                raise ProviderError(f"Page {page} failed after {PAGE_RETRIES} attempts: {last_error}")
 
+            if not records:
+                empty_pages += 1
+                if first_empty_page is None:
+                    first_empty_page = page
+                print(f"[index] page {page}: valid empty listing ({empty_pages}/{MAX_EMPTY_PAGES}); existing files preserved", flush=True)
+                completed_pages.add(page)
+                write_state(status="running", next_page=page + 1, completed_pages=completed_pages)
+                if empty_pages >= MAX_EMPTY_PAGES:
+                    break
+                page += 1
+                continue
+
+            empty_pages = 0
+            first_empty_page = None
+            unique_records = []
+            for record in records:
+                key = canonical_url(record["post_url"])
+                if not key or key in seen_urls:
+                    continue
+                seen_urls.add(key)
+                unique_records.append(record)
+
+            write_page(page, unique_records)
+            completed_pages.add(page)
+            write_state(status="running", next_page=page + 1, completed_pages=completed_pages)
+            print(
+                f"[index] page {page}: {len(records)} discovered, "
+                f"{len(unique_records)} unique records",
+                flush=True,
+            )
+            if REQUEST_DELAY:
+                time.sleep(REQUEST_DELAY)
+            page += 1
+
+        write_state(status="complete", next_page=1, completed_pages=[])
         write_scrape_log(
             status="complete",
-            page=MAX_PAGES,
+            page=progress["last_page"],
+            post_title=progress["last_post"],
+            post_url=progress["last_post_url"],
             posts_scraped=progress["posts"],
             episodes_scraped=progress["episodes"],
         )
         print(
-            f"[index] complete: {progress['posts']} records across "
-            f"{MAX_PAGES} pages, {progress['episodes']} episodes",
+            f"[index] complete: {progress['posts']} discovered records, "
+            f"{progress['episodes']} episodes indexed",
             flush=True,
         )
         return 0
     except Exception as exc:
+        write_state(status="failed", next_page=page, completed_pages=completed_pages, error=str(exc))
         write_scrape_log(
             status="failed",
-            page=progress["last_page"],
+            page=progress["last_page"] or page,
             post_title=progress["last_post"],
             post_url=progress["last_post_url"],
             posts_scraped=progress["posts"],
