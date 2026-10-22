@@ -5,7 +5,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from tests import build_series_index as indexer
-from providers.watchhentai import ProviderError
+from providers.watchhentai import ProviderError, WatchHentai
 
 
 def listing(*slugs):
@@ -52,6 +52,34 @@ class SeriesIndexTests(unittest.TestCase):
         self.assertFalse(indexer.is_series_detail("https://watchhentai.net/series/"))
         self.assertFalse(indexer.is_series_detail("https://watchhentai.net/series/page/2/"))
         self.assertFalse(indexer.is_series_detail("https://other.example/series/alpha/"))
+
+
+    def test_provider_episode_links_are_canonical_and_same_host_only(self):
+        provider = WatchHentai()
+        html = """
+        <a href="/videos/episode-one/">one</a>
+        <a href="https://watchhentai.net/videos/episode-one/?utm=x#player">duplicate</a>
+        <a href="https://other.example/videos/episode-two/">off-site</a>
+        <a href="/videos/">archive</a>
+        """
+        self.assertEqual(
+            provider._episode_links(html),
+            [{"provider": "watchhentai", "page_url": "https://watchhentai.net/videos/episode-one"}],
+        )
+
+    def test_provider_series_links_skip_listing_pagination_and_query_urls(self):
+        provider = WatchHentai()
+        html = """
+        <a href="/series/alpha/">alpha</a>
+        <a href="https://watchhentai.net/series/alpha/?utm=x">duplicate-with-query</a>
+        <a href="/series/page/2/">pagination</a>
+        <a href="/series/?letter=a">filtered archive</a>
+        <a href="https://other.example/series/beta/">off-site</a>
+        """
+        self.assertEqual(
+            provider._series_links(html),
+            [{"provider": "watchhentai", "series_url": "https://watchhentai.net/series/alpha"}],
+        )
 
     def test_crawl_deduplicates_across_pages_and_stops_after_empty_pages(self):
         with tempfile.TemporaryDirectory() as temporary:
