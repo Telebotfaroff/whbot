@@ -113,12 +113,13 @@ def read_state():
         return {}
 
 
-def write_state(*, status, next_page, completed_pages, error=None):
+def write_state(*, status, next_page, completed_pages, error=None, consecutive_empty_pages=0):
     STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
     payload = {
         "status": status,
         "next_page": next_page,
         "completed_pages": sorted(set(completed_pages)),
+        "consecutive_empty_pages": consecutive_empty_pages,
         "updated_at": now_utc(),
         "error": error,
     }
@@ -347,9 +348,13 @@ def main():
         if isinstance(p, int) and 1 <= p < start_page
     )
     seen_urls = existing_urls_before(start_page)
-    empty_pages = 0
-    first_empty_page = None
-    write_state(status="running", next_page=start_page, completed_pages=completed_pages)
+    empty_pages = state.get("consecutive_empty_pages", 0) if start_page > 1 else 0
+    if not isinstance(empty_pages, int) or empty_pages < 0:
+        empty_pages = 0
+    write_state(
+        status="running", next_page=start_page, completed_pages=completed_pages,
+        consecutive_empty_pages=empty_pages,
+    )
     write_scrape_log(status="started", page=start_page)
 
     page = start_page
@@ -371,18 +376,18 @@ def main():
 
             if not records:
                 empty_pages += 1
-                if first_empty_page is None:
-                    first_empty_page = page
                 print(f"[index] page {page}: valid empty listing ({empty_pages}/{MAX_EMPTY_PAGES}); existing files preserved", flush=True)
                 completed_pages.add(page)
-                write_state(status="running", next_page=page + 1, completed_pages=completed_pages)
+                write_state(
+                    status="running", next_page=page + 1, completed_pages=completed_pages,
+                    consecutive_empty_pages=empty_pages,
+                )
                 if empty_pages >= MAX_EMPTY_PAGES:
                     break
                 page += 1
                 continue
 
             empty_pages = 0
-            first_empty_page = None
             unique_records = []
             for record in records:
                 key = canonical_url(record["post_url"])
@@ -393,7 +398,10 @@ def main():
 
             write_page(page, unique_records)
             completed_pages.add(page)
-            write_state(status="running", next_page=page + 1, completed_pages=completed_pages)
+            write_state(
+                status="running", next_page=page + 1, completed_pages=completed_pages,
+                consecutive_empty_pages=0,
+            )
             print(
                 f"[index] page {page}: {len(records)} discovered, "
                 f"{len(unique_records)} unique records",
@@ -403,7 +411,7 @@ def main():
                 time.sleep(REQUEST_DELAY)
             page += 1
 
-        write_state(status="complete", next_page=1, completed_pages=[])
+        write_state(status="complete", next_page=1, completed_pages=[], consecutive_empty_pages=0)
         write_scrape_log(
             status="complete",
             page=progress["last_page"],
@@ -419,7 +427,10 @@ def main():
         )
         return 0
     except Exception as exc:
-        write_state(status="failed", next_page=page, completed_pages=completed_pages, error=str(exc))
+        write_state(
+            status="failed", next_page=page, completed_pages=completed_pages,
+            error=str(exc), consecutive_empty_pages=empty_pages,
+        )
         write_scrape_log(
             status="failed",
             page=progress["last_page"] or page,
