@@ -327,6 +327,36 @@ def write_page(page, records):
         raise
 
 
+def deduplicate_existing_index():
+    """Remove legacy duplicate JSON entries left by older page-scoped crawls."""
+    seen = set()
+    removed = 0
+    directories = []
+    for directory in OUTPUT_ROOT.glob("page *"):
+        match = re.fullmatch(r"page\s+(\d+)", directory.name)
+        if match:
+            directories.append((int(match.group(1)), directory))
+    for _, directory in sorted(directories):
+        for path in sorted(directory.glob("*.json")):
+            try:
+                record = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                # Keep malformed files for manual inspection; do not delete data
+                # that cannot be safely identified.
+                continue
+            key = canonical_url(record.get("post_url") or record.get("link"))
+            if not key:
+                continue
+            if key in seen:
+                path.unlink()
+                removed += 1
+            else:
+                seen.add(key)
+    if removed:
+        print(f"[index] removed {removed} legacy duplicate JSON record(s)", flush=True)
+    return removed
+
+
 def main():
     OUTPUT_ROOT.mkdir(parents=True, exist_ok=True)
     provider = WatchHentai()
@@ -414,6 +444,7 @@ def main():
                 time.sleep(REQUEST_DELAY)
             page += 1
 
+        deduplicate_existing_index()
         write_state(status="complete", next_page=1, completed_pages=[], consecutive_empty_pages=0)
         write_scrape_log(
             status="complete",
