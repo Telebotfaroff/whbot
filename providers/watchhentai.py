@@ -157,9 +157,19 @@ class WatchHentai:
     def _episode_links(self, html):
         seen = set()
         out = []
-        for m in re.finditer(r'href=["\']([^"\']*/videos/[^"\']+)["\']', html, re.I):
-            url = self._absolute(m.group(1)).split("#")[0].rstrip("/")
-            if url == self.base + "/videos" or url in seen:
+        base_host = (urlsplit(self.base).hostname or "").lower()
+        for m in re.finditer(r'href=["\']([^"\']+)["\']', html, re.I):
+            absolute = self._absolute(m.group(1))
+            parsed = urlsplit(absolute)
+            path = re.sub(r"/+", "/", parsed.path or "/").rstrip("/")
+            if (
+                parsed.scheme.lower() not in {"http", "https"}
+                or (parsed.hostname or "").lower() != base_host
+                or not re.fullmatch(r"/videos/[^/]+", path, re.I)
+            ):
+                continue
+            url = f"{parsed.scheme.lower()}://{parsed.netloc.lower()}{path}"
+            if url in seen:
                 continue
             seen.add(url)
             out.append({"provider": "watchhentai", "page_url": url})
@@ -168,25 +178,20 @@ class WatchHentai:
     def _series_links(self, html):
         seen = set()
         out = []
-        for m in re.finditer(r"href=[\"']([^\"']*/series/[^\"']+)[\"']", html, re.I):
-            raw_url = self._absolute(m.group(1)).split("#")[0]
-            parsed = urlsplit(raw_url)
-            path = parsed.path.rstrip("/")
-
-            # Only accept real series detail pages. Listing, pagination, and
-            # filtered archive URLs such as /series/?letter=j must never be
-            # stored as series records.
+        base_host = (urlsplit(self.base).hostname or "").lower()
+        for m in re.finditer(r'href=["\']([^"\']+)["\']', html, re.I):
+            absolute = self._absolute(m.group(1))
+            parsed = urlsplit(absolute)
+            path = re.sub(r"/+", "/", parsed.path or "/").rstrip("/")
+            # Listing, pagination, filtered archives, and off-site URLs are not
+            # series detail records. Ignore query strings during identity checks.
             if (
-                parsed.netloc.lower() != urlsplit(self.base).netloc.lower()
+                (parsed.hostname or "").lower() != base_host
                 or parsed.query
-                or parsed.fragment
-                or path == "/series"
                 or not re.fullmatch(r"/series/[^/]+", path, re.I)
-                or re.fullmatch(r"/series/page/\\d+", path, re.I)
             ):
                 continue
-
-            url = self._absolute(path)
+            url = f"{parsed.scheme.lower()}://{parsed.netloc.lower()}{path}"
             if url in seen:
                 continue
             seen.add(url)
