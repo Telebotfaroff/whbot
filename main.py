@@ -841,16 +841,37 @@ async def download_and_send(
             markup = InlineKeyboardMarkup([
                 [InlineKeyboardButton("☁️ Open GoFile", url=gofile_url)]
             ])
+            sent = None
             try:
-                sent = await app.send_message(
-                    chat_id=target_chat,
-                    text=caption,
-                    reply_markup=markup,
-                )
+                thumb_path = None
+                if ep.get("thumbnail"):
+                    if thumb.exists():
+                        thumb_path = thumb
+                    else:
+                        thumb_path = await asyncio.to_thread(
+                            provider.download_thumbnail, ep["thumbnail"], thumb
+                        )
+                if thumb_path:
+                    sent = await app.send_photo(
+                        chat_id=target_chat,
+                        photo=str(thumb_path),
+                        caption=caption,
+                        reply_markup=markup,
+                    )
             except Exception as exc:
-                print("[gofile] Telegram link message failed: {}".format(exc), flush=True)
-                if telegram_video is None:
-                    raise
+                print("[gofile] thumbnail message failed: {}".format(exc), flush=True)
+
+            if sent is None:
+                try:
+                    sent = await app.send_message(
+                        chat_id=target_chat,
+                        text=caption,
+                        reply_markup=markup,
+                    )
+                except Exception as exc:
+                    print("[gofile] Telegram link message failed: {}".format(exc), flush=True)
+                    if telegram_video is None:
+                        raise
         elif telegram_video is not None:
             sent = telegram_video
             if target_chat != DOWNLOAD_CHANNEL_ID:
