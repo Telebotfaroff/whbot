@@ -127,6 +127,27 @@ class SeriesIndexTests(unittest.TestCase):
                 self.assertTrue(existing.exists())
                 self.assertIn("existing", existing.read_text(encoding="utf-8"))
 
+    def test_legacy_duplicates_are_removed_after_crawl(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            with patch.object(indexer, "OUTPUT_ROOT", root):
+                first = root / "page 1"
+                second = root / "page 2"
+                first.mkdir()
+                second.mkdir()
+                (first / "Alpha.json").write_text(
+                    json.dumps({"post_url": "https://watchhentai.net/series/alpha/"}),
+                    encoding="utf-8",
+                )
+                duplicate = second / "Alpha-copy.json"
+                duplicate.write_text(
+                    json.dumps({"post_url": "https://watchhentai.net/series/alpha?ref=x#top"}),
+                    encoding="utf-8",
+                )
+                self.assertEqual(indexer.deduplicate_existing_index(), 1)
+                self.assertFalse(duplicate.exists())
+                self.assertTrue((first / "Alpha.json").exists())
+
     def test_challenge_page_is_not_treated_as_end_of_pagination(self):
         class ChallengeProvider:
             def _get(self, url, referer=None):
