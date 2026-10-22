@@ -5,3 +5,5 @@ venv/
 .env
 downloads/
 *.log
+whdata/.scrape-state.json
+whdata/.scrape-state.json.tmp
