@@ -254,22 +254,25 @@ def scrape_listing(provider, page, progress):
             "page": page,
         })
 
-        progress["posts"] += 1
-        progress["episodes"] += len(episode_records)
-        progress["last_page"] = page
-        progress["last_post"] = title
-        progress["last_post_url"] = detail_url
-        write_scrape_log(
-            status="running",
-            page=page,
-            post_title=title,
-            post_url=detail_url,
-            posts_scraped=progress["posts"],
-            episodes_scraped=progress["episodes"],
-        )
-
     if not records and _looks_like_block_page(html):
         raise ProviderError(f"Page {page} returned a challenge/block page; not treating it as end-of-pagination")
+
+    # Update counters only after the entire listing page succeeds. A retry after
+    # a partial page failure must not inflate the progress totals.
+    progress["posts"] += len(records)
+    progress["episodes"] += sum(len(record["episodes"]) for record in records)
+    if records:
+        progress["last_page"] = page
+        progress["last_post"] = records[-1]["post_title"]
+        progress["last_post_url"] = records[-1]["post_url"]
+    write_scrape_log(
+        status="running",
+        page=page,
+        post_title=progress["last_post"],
+        post_url=progress["last_post_url"],
+        posts_scraped=progress["posts"],
+        episodes_scraped=progress["episodes"],
+    )
     return records
 
 
