@@ -28,6 +28,10 @@ API_HASH = os.getenv("API_HASH")
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHANNEL_ID = os.getenv("CHANNEL_ID")
 DOWNLOAD_CHANNEL_ID = os.getenv("DOWNLOAD_CHANNEL_ID")
+# Supported: gofile (default), telegram, or both.
+UPLOAD_DESTINATION = os.getenv("UPLOAD_DESTINATION", "gofile").strip().lower()
+if UPLOAD_DESTINATION not in {"gofile", "telegram", "both"}:
+    raise RuntimeError("UPLOAD_DESTINATION must be gofile, telegram, or both")
 BOT_OWNER_ID = int(os.getenv("BOT_OWNER_ID", "7367490186") or 7367490186)
 
 if not API_ID or not API_HASH or not BOT_TOKEN:
@@ -671,98 +675,204 @@ async def download_and_send(
             retained_output = True
             return {"message": None, "path": output, "metadata": metadata}
 
-        if status:
-            await safe_edit(
-                status,
-                series_transfer_text(
-                    series_name or ep.get("title") or "Video",
-                    "upload",
-                    series_episode_index or 1,
-                    series_total or 1,
-                    series_completed,
-                    0,
-                    0,
-                    0,
+        do_gofile = UPLOAD_DESTINATION in {"gofile", "both"}
+        do_telegram_video = UPLOAD_DESTINATION in {"telegram", "both"}
+        gofile_url = None
+        telegram_video = None
+        telegram_url = None
+
+        if not do_gofile and not do_telegram_video:
+            raise RuntimeError("No upload destination is enabled")
+
+        if do_gofile:
+            if status:
+                await safe_edit(
+                    status,
+                    series_transfer_text(
+                        series_name or ep.get("title") or "Video",
+                        "upload",
+                        series_episode_index or 1,
+                        series_total or 1,
+                        series_completed,
+                        0,
+                        0,
+                        0,
+                    ),
+                )
+
+            # Guest upload: no API token is required by this uploader.
+            uploader = GofileUploader()
+            started = time.monotonic()
+            gofile_url = await asyncio.to_thread(
+                uploader.upload,
+                output,
+                gofile_progress_factory(
+                    status,
+                    series_name=series_name or ep.get("title") or "Video",
+                    episode_index=series_episode_index or 1,
+                    episode_total=series_total or 1,
+                    completed_count=series_completed,
+                ) if status else None,
+            )
+            elapsed = max(time.monotonic() - started, 0.001)
+            print(
+                "[gofile] uploaded {} bytes in {:.1f}s ({:.2f} MB/s) -> {}".format(
+                    size, elapsed, size / elapsed / 1048576, gofile_url
                 ),
+                flush=True,
             )
 
-        # Guest upload: no API token is supplied. GoFile creates a temporary
-        # guest account and returns a public downloadPage for this file.
-        uploader = GofileUploader()
-        started = time.monotonic()
-        gofile_url = await asyncio.to_thread(
-            uploader.upload,
-            output,
-            gofile_progress_factory(
-                status,
-                series_name=series_name or ep.get("title") or "Video",
-                episode_index=series_episode_index or 1,
-                episode_total=series_total or 1,
-                completed_count=series_completed,
-            ),
-        )
-        elapsed = max(time.monotonic() - started, 0.001)
-        print(
-            "[gofile] uploaded {} bytes in {:.1f}s ({:.2f} MB/s) -> {}".format(
-                size, elapsed, size / elapsed / 1048576, gofile_url
-            ),
-            flush=True,
-        )
+        if do_telegram_video:
+            if not DOWNLOAD_CHANNEL_ID or not await validate_download_channel():
+                raise ProviderError(
+                    "Telegram video upload requires a valid DOWNLOAD_CHANNEL_ID. "
+                    "Add the bot as a channel administrator and configure the channel ID."
+                )
+            if size > MAX_UPLOAD_BYTES:
+                raise ProviderError(
+                    "Telegram upload is limited to 2 GB by this bot; "
+                    "the downloaded file is {} bytes.".format(size)
+                )
 
-        # Telegram delivery for an individual episode:
-        # thumbnail -> episode title/details -> the public GoFile download link.
+            if status:
+                await safe_edit(
+                    status,
+                    series_transfer_text(
+                        series_name or ep.get("title") or "Video",
+                        "upload",
+                        series_episode_index or 1,
+                        series_total or 1,
+                        series_completed,
+                        0,
+                        0,
+                        0,
+                    ),
+                )
+
+            upload_started = time.monotonic()
+            telegram_progress = _make_transfer_progress(
+                status,
+                series_name or ep.get("title") or "Video",
+                "upload",
+                series_episode_index or 1,
+                series_total or 1,
+                series_completed,
+            ) if status else None
+
+            video_caption = (
+                "🎬 <b>{}</b>\n"
+                "📺 <b>Episode:</b> {}\n"
+                "🎥 <b>Quality:</b> {}\n"
+                "⏱ <b>Duration:</b> {}"
+            ).format(
+                html.escape(ep.get("title") or "Episode"),
+                html.escape(str(ep.get("episode") or "?")),
+                html.escape(label),
+                format_duration(metadata.get("duration")),
+            )
+            thumb_path = None
+            if ep.get("thumbnail"):
+                try:
+                    thumb_path = await asyncio.to_thread(
+                        provider.download_thumbnail, ep["thumbnail"], thumb
+                    )
+                except Exception as exc:
+                    print("[telegram] thumbnail download failed: {}".format(exc), flush=True)
+
+            try:
+                telegram_video = await app.send_video(
+                    chat_id=DOWNLOAD_CHANNEL_ID,
+                    video=str(output),
+                    caption=video_caption,
+                    thumb=str(thumb_path) if thumb_path else None,
+                    supports_streaming=True,
+                    progress=telegram_progress,
+                    progress_args=(upload_started,) if telegram_progress else (),
+                )
+            except Exception as exc:
+                print("[telegram] video upload failed: {}".format(exc), flush=True)
+                raise
+
+            chat = telegram_video.chat
+            if getattr(chat, "username", None):
+                telegram_url = "https://t.me/{}/{}".format(chat.username, telegram_video.id)
+            elif str(chat.id).startswith("-100"):
+                telegram_url = "https://t.me/c/{}/{}".format(str(chat.id)[4:], telegram_video.id)
+            print(
+                "[telegram] video uploaded channel={} message_id={} url={}".format(
+                    chat.id, telegram_video.id, telegram_url or "private-link-unavailable"
+                ),
+                flush=True,
+            )
+
+        # In series mode the caller builds an episode menu from these results.
+        # Avoid sending an extra metadata message for every episode.
         if not send_telegram:
             retained_output = bool(keep_local)
             return {
-                "message": None,
+                "message": telegram_video,
                 "path": output if retained_output else None,
                 "gofile_url": gofile_url,
+                "telegram_url": telegram_url,
                 "metadata": metadata,
                 "label": label,
                 "title": ep.get("title") or "Episode",
                 "episode": ep.get("episode") or "?",
             }
 
-        caption = (
-            f"🎬 <b>{html.escape(ep['title'])}</b>\n"
-            f"📺 <b>Episode:</b> {html.escape(str(ep.get('episode') or '?'))}\n"
-            f"🎥 <b>Quality:</b> {html.escape(label)}\n"
-            f"⏱ <b>Duration:</b> {format_duration(metadata['duration'])}\n\n"
-            f"☁️ <b>GoFile Link:</b> "
-            f'<a href="{html.escape(gofile_url, quote=True)}">Open / Download Episode</a>'
-        )
-
-        markup = InlineKeyboardMarkup([
-            [InlineKeyboardButton("☁️ Open GoFile", url=gofile_url)]
-        ])
-
-        sent = None
-        if thumb_path := (await asyncio.to_thread(
-            provider.download_thumbnail, ep["thumbnail"], thumb
-        ) if ep.get("thumbnail") else None):
+        # Preserve the existing GoFile link post when GoFile is selected.
+        # Telegram-only mode already delivered the actual video to the channel.
+        sent = telegram_video
+        if gofile_url:
+            caption = (
+                "🎬 <b>{}</b>\n"
+                "📺 <b>Episode:</b> {}\n"
+                "🎥 <b>Quality:</b> {}\n"
+                "⏱ <b>Duration:</b> {}\n\n"
+                "☁️ <b>GoFile Link:</b> "
+                '<a href="{}">Open / Download Episode</a>'
+            ).format(
+                html.escape(ep.get("title") or "Episode"),
+                html.escape(str(ep.get("episode") or "?")),
+                html.escape(label),
+                format_duration(metadata.get("duration")),
+                html.escape(gofile_url, quote=True),
+            )
+            markup = InlineKeyboardMarkup([
+                [InlineKeyboardButton("☁️ Open GoFile", url=gofile_url)]
+            ])
             try:
-                sent = await app.send_photo(
+                sent = await app.send_message(
                     chat_id=target_chat,
-                    photo=str(thumb_path),
-                    caption=caption,
+                    text=caption,
                     reply_markup=markup,
                 )
             except Exception as exc:
-                print("[gofile] thumbnail message failed: {}".format(exc), flush=True)
+                print("[gofile] Telegram link message failed: {}".format(exc), flush=True)
+                if telegram_video is None:
+                    raise
+        elif telegram_video is not None:
+            sent = telegram_video
+            if target_chat != DOWNLOAD_CHANNEL_ID:
+                try:
+                    await app.send_message(
+                        chat_id=target_chat,
+                        text="✅ Video uploaded to the Telegram channel.\n" +
+                             (telegram_url or "Open the channel to view it."),
+                    )
+                except Exception as exc:
+                    print("[telegram] upload confirmation failed: {}".format(exc), flush=True)
 
-        if sent is None:
-            sent = await app.send_message(
-                chat_id=target_chat,
-                text=caption,
-                reply_markup=markup,
-            )
-
-        print("[gofile] Telegram link message id={}".format(sent.id), flush=True)
         retained_output = bool(keep_local)
-        if post_id is not None:
+        if post_id is not None and sent is not None:
             mark_video_uploaded(post_id, sent.id)
 
-        return {"message": sent, "path": output if retained_output else None}
+        return {
+            "message": sent,
+            "path": output if retained_output else None,
+            "gofile_url": gofile_url,
+            "telegram_url": telegram_url,
+        }
     except Exception as exc:
         print("[download/gofile] FAILED: {}".format(exc), flush=True)
         raise
@@ -1046,7 +1156,7 @@ async def show_series_preview(message, series, episode_items):
         f"📺 Episodes found: <b>{len(episode_items)}</b>\n"
         f"📚 Total Episodes: <b>{total}</b>\n\n"
         "🔗 Episode pages have been collected.\n"
-        "⬇️ Download episodes individually, or download every episode to GoFile."
+        "⬇️ Download episodes individually. Upload destination: {}.".format(UPLOAD_DESTINATION.upper())
     )
     markup = InlineKeyboardMarkup(
         [[
@@ -1077,13 +1187,18 @@ async def show_series_preview(message, series, episode_items):
 
 
 def series_episode_keyboard(episodes):
-    """Build one GoFile URL button per episode in series order."""
+    """Build per-episode buttons for whichever upload destinations are enabled."""
     rows = []
     for item in episodes:
         number = str(item.get("episode") or item.get("index") or "?")
-        rows.append([
-            InlineKeyboardButton("▶️ Episode {}".format(number), url=item["gofile_url"])
-        ])
+        if item.get("gofile_url"):
+            rows.append([
+                InlineKeyboardButton("☁️ Episode {} · GoFile".format(number), url=item["gofile_url"])
+            ])
+        if item.get("telegram_url"):
+            rows.append([
+                InlineKeyboardButton("▶️ Episode {} · Telegram".format(number), url=item["telegram_url"])
+            ])
     return InlineKeyboardMarkup(rows) if rows else None
 
 
@@ -1237,12 +1352,13 @@ async def download_series(
                         series_completed=index - 1,
                         send_telegram=False,
                     )
-                    if result.get("gofile_url"):
+                    if result.get("gofile_url") or result.get("telegram_url"):
                         series_episode_results.append({
                             "index": index,
                             "episode": result.get("episode") or ep.get("episode") or index,
                             "title": result.get("title") or ep.get("title") or f"Episode {index}",
-                            "gofile_url": result["gofile_url"],
+                            "gofile_url": result.get("gofile_url"),
+                            "telegram_url": result.get("telegram_url"),
                         })
                     completed = True
                     break
