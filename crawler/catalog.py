@@ -120,6 +120,7 @@ def crawl_series(start_page=1, end_page=None, delay=0.25, on_series=None, on_pro
     con = init_db()
     processed = 0
     new_ids = []
+    seen_series_urls = set()
 
     try:
         for page in range(start_page, end_page + 1):
@@ -137,6 +138,9 @@ def crawl_series(start_page=1, end_page=None, delay=0.25, on_series=None, on_pro
 
             for item in items:
                 url = item["series_url"]
+                if url in seen_series_urls:
+                    print("  = duplicate listing URL skipped: {}".format(url), flush=True)
+                    continue
                 existing = con.execute(
                     "SELECT id FROM series WHERE url=?", (url,)
                 ).fetchone()
@@ -174,6 +178,7 @@ def crawl_series(start_page=1, end_page=None, delay=0.25, on_series=None, on_pro
                             )
 
                     con.commit()
+                    seen_series_urls.add(url)
 
                     row = con.execute(
                         "SELECT id FROM series WHERE url=?", (url,)
@@ -226,6 +231,7 @@ def crawl(start_page=0, end_page=None, delay=0.25, on_episode=None):
     con = init_db()
     processed = 0
     new_ids = []
+    seen_episode_urls = set()
 
     try:
         for page in range(start_page, end_page + 1):
@@ -239,6 +245,9 @@ def crawl(start_page=0, end_page=None, delay=0.25, on_episode=None):
             print("  found {} episode URLs".format(len(items)), flush=True)
             for item in items:
                 url = item["page_url"]
+                if url in seen_episode_urls:
+                    print("  = duplicate listing URL skipped: {}".format(url), flush=True)
+                    continue
                 existing = con.execute(
                     "SELECT id FROM posts WHERE url=?", (url,)
                 ).fetchone()
@@ -246,6 +255,7 @@ def crawl(start_page=0, end_page=None, delay=0.25, on_episode=None):
                     ep = provider.get_episode(url, False)
                     save_episode(con, ep)
                     con.commit()
+                    seen_episode_urls.add(url)
                     row = con.execute(
                         "SELECT id FROM posts WHERE url=?", (url,)
                     ).fetchone()
